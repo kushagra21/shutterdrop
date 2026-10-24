@@ -17,8 +17,9 @@ final class AppModel {
     enum ImportState: Equatable {
         case idle
         case waiting
-        case connecting(String)
-        case reading
+        case connecting(host: String, attempt: Int)
+        /// `total` is 0 until the camera has said how many files it has.
+        case reading(done: Int, total: Int)
         case confirm([PendingFile])
         case copying(index: Int, count: Int, name: String)
         case done(Int)
@@ -30,7 +31,23 @@ final class AppModel {
             default: true
             }
         }
+
+        /// Position in the import steps, for the sheet's checklist.
+        var step: Int {
+            switch self {
+            case .idle: 0
+            case .waiting: 1
+            case .connecting: 2
+            case .reading: 3
+            case .confirm: 4
+            case .copying, .done: 5
+            case .failed: -1
+            }
+        }
     }
+
+    /// When the current import started, for the elapsed-time counter.
+    private(set) var importStartedAt: Date?
 
     enum ImportRange: String, CaseIterable, Identifiable {
         case today, lastWeek, everything
@@ -88,13 +105,93 @@ final class AppModel {
     init() {
         let saved = UserDefaults.standard.string(forKey: Self.libraryKey)
         library = PhotoLibrary(root: saved.map { URL(filePath: $0) } ?? PhotoLibrary.defaultRoot)
+        upgradeToShutterdropFolder()
         reloadDays()
         NotificationCenter.default.addObserver(forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { _ in
             MainActor.assumeIsolated { self.unseenShots = 0 }
         }
     }
 
+    /// Shots selected in the grid (for deleting). `selectedShotID` is the one shown in detail.
+    var selection: Set<Shot.ID> = []
+
     var selectedShot: Shot? { shots.first { $0.id == selectedShotID } ?? shots.first }
+    var selectedShots: [Shot] { shots.filter { selection.contains($0.id) } }
+
+    /// Click selects one; ⌘-click toggles; ⇧-click extends from the last click.
+    func select(_ shot: Shot, modifiers: NSEvent.ModifierFlags) {
+        if modifiers.contains(.command) {
+            if selection.remove(shot.id) == nil { selection.insert(shot.id) }
+        } else if modifiers.contains(.shift),
+                  let anchor = shots.firstIndex(where: { $0.id == selectedShotID }),
+                  let target = shots.firstIndex(where: { $0.id == shot.id }) {
+            selection.formUnion(shots[min(anchor, target)...max(anchor, target)].map(\.id))
+        } else {
+            selection = [shot.id]
+        }
+        selectedShotID = shot.id
+    }
+
+    func selectAllShots() {
+        selection = Set(shots.map(\.id))
+    }
+
+    // MARK: - Deleting
+
+    /// Moves the shots' previews and full-size files to the Trash, after asking.
+    func trash(_ shots: [Shot]) {
+        guard !shots.isEmpty else { return }
+        let files = shots.flatMap { [$0.preview].compactMap { $0 } + $0.originals }
+        let bytes = files.reduce(Int64(0)) { $0 + Int64((try? $1.url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0) }
+        let alert = NSAlert()
+        alert.messageText = shots.count == 1 ? "Move this photo to the Trash?" : "Move \(shots.count) photos to the Trash?"
+        alert.informativeText = "\(files.count) file(s), \(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)), including previews and full-size files, are moved to the Trash in Finder. Photos still on the camera's card can be imported again."
+        alert.addButton(withTitle: "Move to Trash")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        do {
+            for shot in shots { try library.trash(shot) }
+        } catch {
+            showError("Couldn't move everything to the Trash", error)
+        }
+        selection.subtract(shots.map(\.id))
+        reloadDays()
+    }
+
+    /// What a delete acts on: the selection, or else the photo in the detail pane.
+    var shotsToTrash: [Shot] {
+        selectedShots.isEmpty ? [selectedShot].compactMap { $0 } : selectedShots
+    }
+
+    func trashSelected() {
+        trash(shotsToTrash)
+    }
+
+    /// Moves a whole day folder to the Trash, after asking.
+    func trashDay(_ day: URL) {
+        let count = library.shots(inDay: day).count
+        let alert = NSAlert()
+        alert.messageText = "Move all photos from \(ContentView.dayTitle(day)) to the Trash?"
+        alert.informativeText = "\(count) photo(s) in \(day.path) are moved to the Trash in Finder."
+        alert.addButton(withTitle: "Move to Trash")
+        alert.addButton(withTitle: "Cancel")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        do {
+            try library.trashDay(day)
+        } catch {
+            showError("Couldn't move the day to the Trash", error)
+        }
+        if selectedDay == day { selectedDay = nil }
+        reloadDays()
+    }
+
+    private func showError(_ title: String, _ error: Error) {
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = title
+        alert.informativeText = error.localizedDescription
+        alert.runModal()
+    }
 
     // MARK: - Library
 
@@ -111,6 +208,29 @@ final class AppModel {
         reloadDays()
     }
 
+    /// Libraries chosen before photos went into a `Shutterdrop` subfolder kept
+    /// day folders directly in the chosen folder; move them into one.
+    private func upgradeToShutterdropFolder() {
+        guard isLibraryConfigured, library.root.lastPathComponent != PhotoLibrary.folderName else { return }
+        let old = library
+        let new = PhotoLibrary.root(in: old.root)
+        do {
+            let moved = try old.moveContents(to: new)
+            setLibraryRoot(new)
+            if moved > 0 {
+                DispatchQueue.main.async {
+                    let alert = NSAlert()
+                    alert.messageText = "Photos moved into a Shutterdrop folder"
+                    alert.informativeText = "To keep \(old.root.lastPathComponent) tidy, Shutterdrop now saves into \(new.path). Your \(moved) existing file(s) were moved there."
+                    alert.runModal()
+                }
+            }
+        } catch {
+            // Leave everything where it is; the app keeps using the old folder.
+            DispatchQueue.main.async { self.showError("Couldn't move photos into a Shutterdrop folder", error) }
+        }
+    }
+
     /// Lets the user pick a folder, starting from `start`.
     func chooseFolder(startingAt start: URL, prompt: String) -> URL? {
         let panel = NSOpenPanel()
@@ -119,18 +239,19 @@ final class AppModel {
         panel.canCreateDirectories = true
         panel.directoryURL = FileManager.default.fileExists(atPath: start.path) ? start : start.deletingLastPathComponent()
         panel.prompt = prompt
-        panel.message = "Shutterdrop keeps a folder per day inside, with previews and originals."
+        panel.message = "Shutterdrop creates a folder named \"Shutterdrop\" inside the folder you choose, with a folder per day."
         return panel.runModal() == .OK ? panel.url : nil
     }
 
     /// Choose a new library folder and offer to bring the existing photos along.
     func changeLibraryFolder() {
-        guard canChangeLibrary, let url = chooseFolder(startingAt: library.root, prompt: "Use Folder") else { return }
-        adoptLibraryFolder(url)
+        guard canChangeLibrary, let url = chooseFolder(startingAt: library.root.deletingLastPathComponent(), prompt: "Use Folder") else { return }
+        adoptLibraryFolder(PhotoLibrary.root(in: url))
     }
 
-    /// Switches to `url`, offering to move the photos already in the current
-    /// folder. Returns false if the user cancelled.
+    /// Switches to the library at `url` (already a `Shutterdrop` folder),
+    /// offering to move the photos already in the current one. Returns false
+    /// if the user cancelled.
     @discardableResult
     func adoptLibraryFolder(_ url: URL) -> Bool {
         let (files, bytes) = library.contentsSummary()
@@ -197,6 +318,7 @@ final class AppModel {
 
     func reloadShots() {
         shots = selectedDay.map(library.shots(inDay:)) ?? []
+        selection.formIntersection(shots.map(\.id))
         if let selectedShotID, !shots.contains(where: { $0.id == selectedShotID }) {
             self.selectedShotID = nil
         }
@@ -251,6 +373,7 @@ final class AppModel {
             days = library.days()
             if selectedDay != day { selectedDay = day } else { reloadShots() }
             selectedShotID = shots.first { $0.preview?.url.lastPathComponent == photo.url.lastPathComponent }?.id
+            selection = Set([selectedShotID].compactMap { $0 })
         case let .problem(problem):
             lastProblem = problem
         }
@@ -265,6 +388,7 @@ final class AppModel {
     func startImport() {
         guard importTask == nil else { return }
         importState = .waiting
+        importStartedAt = Date()
         let defaults = UserDefaults.standard
         var formats: Set<UInt16> = []
         if defaults.object(forKey: Self.importJPEGKey) as? Bool ?? true { formats.insert(0x3801) }
@@ -278,7 +402,7 @@ final class AppModel {
                     importState = .failed("The camera didn't show up. Is Send to Computer running, with the camera on the same Wi-Fi as this Mac?")
                     return
                 }
-                importState = .connecting(host)
+                importState = .connecting(host: host, attempt: 1)
                 let saved = try await importer.run(
                     host: host,
                     guid: try ClientIdentity.guid(),
@@ -323,8 +447,12 @@ final class AppModel {
     private func apply(_ update: CardImporter.Update) {
         guard importState.isActive else { return }
         switch update {
+        case let .retrying(attempt):
+            if case let .connecting(host, _) = importState { importState = .connecting(host: host, attempt: attempt) }
         case .connected:
-            importState = .reading
+            importState = .reading(done: 0, total: 0)
+        case let .reading(done, total):
+            importState = .reading(done: done, total: total)
         case .found:
             break  // the confirmation step shows the list
         case let .saved(photo, index, count):

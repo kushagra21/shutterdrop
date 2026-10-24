@@ -1,14 +1,20 @@
 import ShutterdropCore
 import SwiftUI
 
-/// Walks through a Send to Computer import: wait, read the card, confirm, copy.
+/// Walks through a Send to Computer import: wait, connect, read the card,
+/// confirm, copy. A checklist and elapsed time show it's working throughout.
 struct ImportSheet: View {
     @Environment(AppModel.self) private var model
 
     var body: some View {
-        @Bindable var model = model
         VStack(alignment: .leading, spacing: 16) {
-            Text("Import Full-Size Files").font(.title2.bold())
+            HStack {
+                Text("Import Full-Size Files").font(.title2.bold())
+                Spacer()
+                if model.importState.isActive, let started = model.importStartedAt {
+                    ElapsedTime(since: started)
+                }
+            }
             content
             Spacer(minLength: 0)
             HStack {
@@ -17,7 +23,7 @@ struct ImportSheet: View {
             }
         }
         .padding(20)
-        .frame(width: 460, height: 340)
+        .frame(width: 480, height: 400)
         .interactiveDismissDisabled(model.importState.isActive)
     }
 
@@ -32,24 +38,20 @@ struct ImportSheet: View {
             .pickerStyle(.radioGroup)
             Text("Files already in the library are skipped. Dates follow the camera's clock.")
                 .font(.callout).foregroundStyle(.secondary)
-        case .waiting:
-            step("Waiting for the camera…", detail: "Make sure this Mac is on your home Wi-Fi, then on the camera choose MENU → Network → Send to Computer.")
-        case let .connecting(host):
-            step("Connecting to the camera at \(host)…", detail: "The camera should show \"Sending… Shutterdrop\".")
-        case .reading:
-            step("Reading the camera's card…", detail: "This takes about 20 seconds over Wi-Fi.")
+        case .waiting, .connecting, .reading:
+            ImportSteps(state: model.importState)
         case let .confirm(files):
+            ImportSteps(state: model.importState)
             confirmation(files)
         case let .copying(index, count, name):
-            VStack(alignment: .leading, spacing: 8) {
-                ProgressView(value: Double(index), total: Double(count)) {
-                    Text("Copied \(index) of \(count)")
-                } currentValueLabel: {
-                    Text(name)
-                }
-                Text("Keep the camera on and near the router. Cancel stops after the current file; the next import carries on from there.")
-                    .font(.callout).foregroundStyle(.secondary)
+            ImportSteps(state: model.importState)
+            ProgressView(value: Double(index), total: Double(count)) {
+                Text("Copied \(index) of \(count)")
+            } currentValueLabel: {
+                Text(name)
             }
+            Text("Keep the camera on and near the router. Cancel stops after the current file; the next import carries on from there.")
+                .font(.callout).foregroundStyle(.secondary)
         case let .done(count):
             Label(count == 0 ? "Nothing new to import." : "Copied \(count) file(s).", systemImage: "checkmark.circle.fill")
                 .foregroundStyle(.green).font(.title3)
@@ -82,28 +84,90 @@ struct ImportSheet: View {
         }
     }
 
-    private func step(_ title: String, detail: String) -> some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                ProgressView().controlSize(.small)
-                Text(title).font(.headline)
-            }
-            Text(detail).foregroundStyle(.secondary)
-        }
-    }
-
     private func confirmation(_ files: [PendingFile]) -> some View {
         let bytes = files.reduce(0) { $0 + $1.size }
         let dates = files.compactMap(\.captured)
         // Measured on the A7 III: ~1.2 MB/s at first, slower on long imports.
-        let minutes = max(1, Int((Double(bytes) / 1_000_000 / 1.0 / 60).rounded(.up)))
-        return VStack(alignment: .leading, spacing: 8) {
+        let minutes = max(1, Int((Double(bytes) / 1_000_000 / 60).rounded(.up)))
+        return VStack(alignment: .leading, spacing: 6) {
             Text("\(files.count) new file(s), \(ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file))")
                 .font(.headline)
             if let first = dates.min(), let last = dates.max() {
                 Text("Taken \(first.formatted(date: .abbreviated, time: .shortened)) – \(last.formatted(date: .abbreviated, time: .shortened)) (camera clock)")
             }
             Text("About \(minutes) min or more over Wi-Fi.").foregroundStyle(.secondary)
+        }
+        .padding(.top, 4)
+    }
+}
+
+/// The import steps with a tick for each one done and a spinner on the current one.
+struct ImportSteps: View {
+    let state: AppModel.ImportState
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            row(1, "Waiting for the camera",
+                detail: "Mac on home Wi-Fi; on the camera choose MENU → Network → Send to Computer.")
+            row(2, connectingTitle, detail: connectingDetail)
+            row(3, readingTitle, detail: state.step == 3 ? "The camera answers one file at a time; this takes a while over Wi-Fi." : nil)
+            if case let .reading(done, total) = state, total > 0 {
+                ProgressView(value: Double(done), total: Double(total)).padding(.leading, 28)
+            }
+            row(4, "Choose what to copy", detail: nil)
+            row(5, "Copy files", detail: nil)
+        }
+    }
+
+    private var connectingTitle: String {
+        if case let .connecting(host, _) = state { return "Connecting to the camera at \(host)" }
+        return "Connecting to the camera"
+    }
+
+    private var connectingDetail: String? {
+        guard case let .connecting(_, attempt) = state else { return nil }
+        return attempt > 1
+            ? "Camera found; it's still opening its connection (attempt \(attempt))…"
+            : "Camera found. It should show \"Sending… Shutterdrop\"."
+    }
+
+    private var readingTitle: String {
+        if case let .reading(done, total) = state, total > 0 { return "Reading the camera's card (\(done) of \(total))" }
+        return "Reading the camera's card"
+    }
+
+    @ViewBuilder private func row(_ step: Int, _ title: String, detail: String?) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Group {
+                if state.step > step {
+                    Image(systemName: "checkmark.circle.fill").foregroundStyle(.green)
+                } else if state.step == step {
+                    ProgressView().controlSize(.small)
+                } else {
+                    Image(systemName: "circle").foregroundStyle(.tertiary)
+                }
+            }
+            .frame(width: 18)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).foregroundStyle(state.step >= step ? .primary : .secondary)
+                    .fontWeight(state.step == step ? .semibold : .regular)
+                if let detail, state.step == step {
+                    Text(detail).font(.callout).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+    }
+}
+
+/// "0:42" counting up, so a long wait still looks alive.
+struct ElapsedTime: View {
+    let since: Date
+
+    var body: some View {
+        TimelineView(.periodic(from: since, by: 1)) { context in
+            let seconds = max(0, Int(context.date.timeIntervalSince(since)))
+            Label(String(format: "%d:%02d", seconds / 60, seconds % 60), systemImage: "clock")
+                .font(.callout.monospacedDigit()).foregroundStyle(.secondary)
         }
     }
 }

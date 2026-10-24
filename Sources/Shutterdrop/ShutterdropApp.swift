@@ -38,6 +38,14 @@ struct ShutterdropApp: App {
             CommandGroup(replacing: .help) {
                 Button("Camera Setup Guide") { firstRunSheet = .guide }
             }
+            CommandGroup(after: .pasteboard) {
+                Divider()
+                Button("Select All Photos") { model.selectAllShots() }
+                    .keyboardShortcut("a", modifiers: [.command, .option])
+                Button("Move to Trash") { model.trashSelected() }
+                    .keyboardShortcut(.delete, modifiers: .command)
+                    .disabled(model.shots.isEmpty)
+            }
             CommandGroup(after: .newItem) {
                 Button("Change Photo Folder…") { model.changeLibraryFolder() }
                     .disabled(!model.canChangeLibrary)

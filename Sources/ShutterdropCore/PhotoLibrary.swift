@@ -11,14 +11,30 @@ public struct Photo: Equatable, Sendable {
 /// `<root>/<yyyy-MM-dd>/originals`, dated by the camera's clock.
 /// An original's capture time is stored as its file modification date.
 public struct PhotoLibrary: Sendable {
+    public static let folderName = "Shutterdrop"
+
     public static var defaultRoot: URL {
-        FileManager.default.urls(for: .picturesDirectory, in: .userDomainMask)[0].appending(path: "Shutterdrop")
+        root(in: FileManager.default.urls(for: .picturesDirectory, in: .userDomainMask)[0])
+    }
+
+    /// The library for a folder the user picked: a `Shutterdrop` folder inside
+    /// it, so day folders never spill into e.g. ~/Downloads. A pick that is
+    /// already a `Shutterdrop` folder is used as is.
+    public static func root(in chosen: URL) -> URL {
+        chosen.lastPathComponent == folderName ? chosen : chosen.appending(path: folderName)
     }
 
     public let root: URL
+    /// How deleted files go away: the Trash, so a mistake can be undone (tests delete outright).
+    let discard: @Sendable (URL) throws -> Void
 
     public init(root: URL = defaultRoot) {
+        self.init(root: root) { try FileManager.default.trashItem(at: $0, resultingItemURL: nil) }
+    }
+
+    init(root: URL, discard: @escaping @Sendable (URL) throws -> Void) {
         self.root = root
+        self.discard = discard
     }
 
     public func previewsFolder(for date: Date?) -> URL { dayFolder(date).appending(path: "previews") }
@@ -74,8 +90,14 @@ public struct PhotoLibrary: Sendable {
         let source = root.standardizedFileURL.resolvingSymlinksInPath().path
         let destination = newRoot.standardizedFileURL.resolvingSymlinksInPath().path
         guard source != destination else { return 0 }
-        guard !destination.hasPrefix(source + "/") else {
-            throw CocoaError(.fileWriteInvalidFileName, userInfo: [NSLocalizedDescriptionKey: "The new folder is inside the current one."])
+        // Only day folders move, so the new folder may sit inside the old one
+        // (~/Downloads → ~/Downloads/Shutterdrop) but not inside a day.
+        let insideADay = days().contains { day in
+            let path = day.standardizedFileURL.resolvingSymlinksInPath().path
+            return destination == path || destination.hasPrefix(path + "/")
+        }
+        guard !insideADay else {
+            throw CocoaError(.fileWriteInvalidFileName, userInfo: [NSLocalizedDescriptionKey: "The new folder is inside one of the day folders."])
         }
         let fileManager = FileManager.default
         try fileManager.createDirectory(at: newRoot, withIntermediateDirectories: true)
@@ -100,12 +122,38 @@ public struct PhotoLibrary: Sendable {
         return moved
     }
 
-    /// Day folders, newest first.
+    /// Day folders, newest first. Only folders Shutterdrop creates count
+    /// (`yyyy-MM-dd` and `undated`), so a library inside e.g. ~/Downloads
+    /// never shows, moves or deletes unrelated folders.
     public func days() -> [URL] {
         let folders = (try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: [.isDirectoryKey])) ?? []
         return folders
-            .filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true && !$0.lastPathComponent.hasPrefix(".") }
+            .filter { Self.isDayFolderName($0.lastPathComponent) && (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
             .sorted { $0.lastPathComponent > $1.lastPathComponent }
+    }
+
+    static func isDayFolderName(_ name: String) -> Bool {
+        name == "undated" || name.wholeMatch(of: /\d{4}-\d{2}-\d{2}/) != nil
+    }
+
+    /// Moves a shot's files (preview and originals) to the Trash.
+    public func trash(_ shot: Shot) throws {
+        for photo in [shot.preview].compactMap({ $0 }) + shot.originals {
+            guard isInside(photo.url) else { continue }
+            try discard(photo.url)
+        }
+    }
+
+    /// Moves a whole day folder to the Trash; refuses anything that isn't one of this library's days.
+    public func trashDay(_ day: URL) throws {
+        guard days().map(\.standardizedFileURL).contains(day.standardizedFileURL) else {
+            throw CocoaError(.fileNoSuchFile, userInfo: [NSLocalizedDescriptionKey: "\(day.lastPathComponent) isn't a Shutterdrop day folder."])
+        }
+        try discard(day)
+    }
+
+    private func isInside(_ url: URL) -> Bool {
+        url.standardizedFileURL.path.hasPrefix(root.standardizedFileURL.path + "/")
     }
 
     public func shots(inDay folder: URL) -> [Shot] {

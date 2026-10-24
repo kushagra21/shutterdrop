@@ -19,10 +19,12 @@ scripts/build-app.sh && open build/Shutterdrop.app   # the Dock app
 
 In the app: **Start Live** while shooting (camera on Ctrl w/ Smartphone, Mac on
 the camera's `DIRECT-…` Wi-Fi), then **Import Full-Size** afterwards (Mac back on
-home Wi-Fi, camera on Send to Computer). On first run the app asks where to
-save photos (default `~/Pictures/Shutterdrop`); the sidebar footer shows the
-folder and can change it, moving existing photos if you like. Inside, photos go
-to `<date>/previews` and `<date>/originals`, dated by the camera's clock.
+home Wi-Fi, camera on Send to Computer). On first run the app asks for a
+location and creates a `Shutterdrop` folder there (default
+`~/Pictures/Shutterdrop`); the sidebar footer shows it and can change it,
+moving existing photos if you like. Inside, photos go to `<date>/previews` and
+`<date>/originals`, dated by the camera's clock. Deleting from the app moves
+files to the Trash.
 Pair the camera from Camera → Pair Camera over USB. Allow Local Network access
 when macOS asks.
 

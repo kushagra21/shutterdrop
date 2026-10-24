@@ -6,12 +6,14 @@ struct FolderSetupView: View {
     @Environment(AppModel.self) private var model
     let done: () -> Void
 
-    @State private var folder = PhotoLibrary.defaultRoot
+    /// The folder picked; photos go into a Shutterdrop folder inside it.
+    @State private var parent = PhotoLibrary.defaultRoot.deletingLastPathComponent()
+    private var folder: URL { PhotoLibrary.root(in: parent) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Where should Shutterdrop save photos?").font(.title2.bold())
-            Text("Live previews and full-size files go into this folder, one subfolder per day. You can change it later from the sidebar or Settings.")
+            Text("Choose a location. Shutterdrop creates a \"Shutterdrop\" folder there and keeps a folder per day inside it. You can change it later from the sidebar or Settings.")
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
 
@@ -24,7 +26,7 @@ struct FolderSetupView: View {
                 }
                 Spacer()
                 Button("Choose Another…") {
-                    if let url = model.chooseFolder(startingAt: folder, prompt: "Choose") { folder = url }
+                    if let url = model.chooseFolder(startingAt: parent, prompt: "Choose") { parent = url }
                 }
             }
             .padding(12)
@@ -40,6 +42,6 @@ struct FolderSetupView: View {
         }
         .padding(24)
         .frame(width: 520)
-        .onAppear { folder = model.library.root }
+        .onAppear { parent = model.library.root.deletingLastPathComponent() }
     }
 }

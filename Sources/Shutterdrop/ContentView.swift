@@ -4,6 +4,8 @@ import SwiftUI
 struct ContentView: View {
     @Environment(AppModel.self) private var model
 
+    static func dayTitle(_ day: URL) -> String { DayList.title(day) }
+
     var body: some View {
         @Bindable var model = model
         NavigationSplitView {
@@ -96,6 +98,11 @@ struct DayList: View {
         @Bindable var model = model
         List(model.days, id: \.self, selection: $model.selectedDay) { day in
             Label(Self.title(day), systemImage: "calendar")
+                .contextMenu {
+                    Button("Show in Finder") { model.revealInFinder([day]) }
+                    Divider()
+                    Button("Move Day to Trash…", role: .destructive) { model.trashDay(day) }
+                }
         }
         .overlay {
             if model.days.isEmpty {
@@ -163,8 +170,16 @@ struct ShotGrid: View {
         ScrollView {
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 140), spacing: 8)], spacing: 8) {
                 ForEach(model.shots) { shot in
-                    ShotCell(shot: shot, selected: shot.id == model.selectedShot?.id)
-                        .onTapGesture { model.selectedShotID = shot.id }
+                    ShotCell(shot: shot, selected: model.selection.contains(shot.id) || (model.selection.isEmpty && shot.id == model.selectedShot?.id))
+                        .onTapGesture { model.select(shot, modifiers: NSEvent.modifierFlags) }
+                        .contextMenu {
+                            let targets = model.selection.contains(shot.id) ? model.selectedShots : [shot]
+                            Button("Show in Finder") { model.revealInFinder(targets.map(\.displayURL)) }
+                            Divider()
+                            Button(targets.count == 1 ? "Move to Trash…" : "Move \(targets.count) Photos to Trash…", role: .destructive) {
+                                model.trash(targets)
+                            }
+                        }
                 }
             }
             .padding(10)
@@ -174,8 +189,17 @@ struct ShotGrid: View {
                 Text("No photos on this day").foregroundStyle(.secondary)
             }
         }
+        .onDeleteCommand { model.trashSelected() }
         .navigationTitle(model.selectedDay.map(DayList.title) ?? "Shutterdrop")
-        .navigationSubtitle(model.shots.isEmpty ? "" : "\(model.shots.count) photo(s)")
+        .navigationSubtitle(subtitle)
+    }
+}
+
+extension ShotGrid {
+    private var subtitle: String {
+        guard !model.shots.isEmpty else { return "" }
+        let selected = model.selection.count
+        return selected > 1 ? "\(selected) of \(model.shots.count) selected" : "\(model.shots.count) photo(s)"
     }
 }
 
@@ -241,6 +265,15 @@ struct ShotDetail: View {
             }
             .formStyle(.grouped)
             .frame(maxHeight: 230)
+            HStack {
+                Spacer()
+                // Acts on the whole selection, like ⌘⌫ and the tiles' context menu.
+                let count = model.shotsToTrash.count
+                Button(count > 1 ? "Move \(count) Photos to Trash…" : "Move to Trash…", systemImage: "trash", role: .destructive) {
+                    model.trashSelected()
+                }
+            }
+            .padding([.horizontal, .bottom], 12)
         }
     }
 }

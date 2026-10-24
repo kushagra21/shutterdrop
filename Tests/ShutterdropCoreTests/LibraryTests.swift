@@ -126,5 +126,51 @@ private func photo(_ path: String, _ captured: Date?) -> Photo {
     #expect(new.originals(inDay: new.dayFolder(day1)).map(\.url.lastPathComponent) == ["A.JPG"])
     #expect(new.originals(inDay: new.dayFolder(day2)).map(\.url.lastPathComponent) == ["B.JPG", "C.JPG"])
     #expect(try Data(contentsOf: new.dayFolder(day2).appending(path: "originals/C.JPG")) == Data([9]))
-    #expect(throws: (any Error).self) { try new.moveContents(to: new.root.appending(path: "inside")) }
+    #expect(throws: (any Error).self) { try new.moveContents(to: new.dayFolder(day1).appending(path: "inside")) }
+}
+
+@Test func libraryLivesInShutterdropFolder() {
+    #expect(PhotoLibrary.root(in: URL(filePath: "/Users/x/Downloads")).path == "/Users/x/Downloads/Shutterdrop")
+    #expect(PhotoLibrary.root(in: URL(filePath: "/Users/x/Pictures/Shutterdrop")).path == "/Users/x/Pictures/Shutterdrop")
+    #expect(PhotoLibrary.defaultRoot.lastPathComponent == "Shutterdrop")
+}
+
+@Test func movesDaysIntoSubfolder() throws {
+    // Upgrading a library kept directly in ~/Downloads into ~/Downloads/Shutterdrop.
+    let base = FileManager.default.temporaryDirectory.appending(path: "shutterdrop-sub-\(UUID())")
+    defer { try? FileManager.default.removeItem(at: base) }
+    let old = PhotoLibrary(root: base)
+    _ = try old.addOriginal([1], named: "A.JPG", captured: date(23, 10, 0, 0))
+    try FileManager.default.createDirectory(at: base.appending(path: "Apps"), withIntermediateDirectories: true)
+    let new = PhotoLibrary(root: PhotoLibrary.root(in: base))
+    #expect(try old.moveContents(to: new.root) == 1)
+    #expect(new.days().map(\.lastPathComponent) == ["2026-11-23"])
+    #expect(old.days().isEmpty)
+    #expect(FileManager.default.fileExists(atPath: base.appending(path: "Apps").path))
+}
+
+@Test func onlyShutterdropDayFoldersCount() throws {
+    let root = FileManager.default.temporaryDirectory.appending(path: "shutterdrop-days-\(UUID())")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let library = PhotoLibrary(root: root) { try FileManager.default.removeItem(at: $0) }
+    for name in ["2026-10-24", "undated", "2023-11 – Banjara", "Apps", "Sony Camera Update v4.04"] {
+        try FileManager.default.createDirectory(at: root.appending(path: name), withIntermediateDirectories: true)
+    }
+    try Data().write(to: root.appending(path: "2026-10-25"))  // a file, not a folder
+    #expect(library.days().map(\.lastPathComponent) == ["undated", "2026-10-24"])
+    #expect(throws: (any Error).self) { try library.trashDay(root.appending(path: "Apps")) }
+    #expect(FileManager.default.fileExists(atPath: root.appending(path: "Apps").path))
+}
+
+@Test func trashesShotFiles() throws {
+    let root = FileManager.default.temporaryDirectory.appending(path: "shutterdrop-trash-\(UUID())")
+    defer { try? FileManager.default.removeItem(at: root) }
+    // Delete outright instead of filling the real Trash.
+    let library = PhotoLibrary(root: root) { try FileManager.default.removeItem(at: $0) }
+    let captured = date(23, 13, 38, 52)
+    let keep = try library.addOriginal([1], named: "DSC00001.JPG", captured: captured)
+    let gone = try library.addOriginal([2], named: "DSC00002.JPG", captured: captured)
+    try library.trash(Shot(preview: nil, originals: [gone]))
+    #expect(!FileManager.default.fileExists(atPath: gone.url.path))
+    #expect(FileManager.default.fileExists(atPath: keep.url.path))
 }

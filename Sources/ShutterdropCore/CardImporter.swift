@@ -15,7 +15,11 @@ public struct PendingFile: Equatable, Sendable {
 /// skipping files the library already has.
 public struct CardImporter: Sendable {
     public enum Update: Sendable {
+        /// The camera didn't accept the connection yet; trying again.
+        case retrying(attempt: Int)
         case connected(model: String)
+        /// Reading the card: `done` of `total` files looked at.
+        case reading(done: Int, total: Int)
         /// The card has been read; `new` is what will be copied if confirmed.
         case found(total: Int, new: [PendingFile])
         case saved(Photo, index: Int, count: Int)
@@ -67,12 +71,15 @@ public struct CardImporter: Sendable {
         // The camera announces itself over SSDP a moment before it opens 15740,
         // and its Wi-Fi may still be waking up; keep trying for a while.
         let deadline = ContinuousClock.now + Self.connectPatience
+        var attempt = 1
         while true {
             do {
                 _ = try await client.connect()
                 break
             } catch {
                 guard ContinuousClock.now < deadline else { throw error }
+                attempt += 1
+                onUpdate(.retrying(attempt: attempt))
                 try await Task.sleep(for: .seconds(1))
             }
         }
@@ -131,17 +138,24 @@ public struct CardImporter: Sendable {
         confirm: @Sendable ([PendingFile]) async -> Bool,
         onUpdate: @Sendable (Update) -> Void
     ) async throws -> [Photo] {
-        var candidates: [(handle: UInt32, info: ObjectInfo, captured: Date?)] = []
+        var handles: [UInt32] = []
         for storage in try await client.getStorageIDs() {
-            for handle in try await client.getObjectHandles(storageID: storage) {
-                let object = try await client.getObjectInfo(handle: handle)
-                let wanted = formats.isEmpty ? object.format != Self.association : formats.contains(object.format)
-                let captured = CameraTimestamp.fromPTP(object.captureDate)
-                // With a cutoff, undated files are skipped too.
-                let recent = since.map { cutoff in captured.map { $0 >= cutoff } ?? false } ?? true
-                guard wanted, recent else { continue }
-                candidates.append((handle, object, captured))
+            handles += try await client.getObjectHandles(storageID: storage)
+        }
+        onUpdate(.reading(done: 0, total: handles.count))
+
+        var candidates: [(handle: UInt32, info: ObjectInfo, captured: Date?)] = []
+        for (index, handle) in handles.enumerated() {
+            let object = try await client.getObjectInfo(handle: handle)
+            if (index + 1) % 10 == 0 || index + 1 == handles.count {
+                onUpdate(.reading(done: index + 1, total: handles.count))
             }
+            let wanted = formats.isEmpty ? object.format != Self.association : formats.contains(object.format)
+            let captured = CameraTimestamp.fromPTP(object.captureDate)
+            // With a cutoff, undated files are skipped too.
+            let recent = since.map { cutoff in captured.map { $0 >= cutoff } ?? false } ?? true
+            guard wanted, recent else { continue }
+            candidates.append((handle, object, captured))
         }
         let pending = candidates.filter {
             !library.hasOriginal(named: $0.info.filename, size: $0.info.compressedSize, captured: $0.captured)
