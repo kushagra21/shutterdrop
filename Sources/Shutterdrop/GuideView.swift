@@ -12,9 +12,9 @@ struct GuideView: View {
                 "1. One-time pairing (USB)",
                 icon: "cable.connector",
                 """
-                Send to Computer only works with a computer registered on the camera. Pairing \
-                isn't built into the app yet: follow "Pairing" in the project README once, \
-                with the camera on USB Connection → Mass Storage.
+                Send to Computer only works with a computer registered on the camera. Set \
+                MENU → Setup → USB Connection → Mass Storage, plug the camera in, eject its \
+                disk, then choose Camera → Pair Camera over USB (or Settings).
                 """
             )
             section(

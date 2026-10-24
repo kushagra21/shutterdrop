@@ -76,6 +76,11 @@ final class AppModel {
     var importRange: ImportRange = .today
     var showingImport = false
 
+    enum PairState: Equatable {
+        case idle, pairing, paired, failed(String)
+    }
+    private(set) var pairState: PairState = .idle
+
     private var liveTask: Task<Void, Never>?
     private var importTask: Task<Void, Never>?
     private var confirmation: CheckedContinuation<Bool, Never>?
@@ -93,11 +98,92 @@ final class AppModel {
 
     // MARK: - Library
 
+    /// False until the first-run folder step has been completed.
+    var isLibraryConfigured: Bool { UserDefaults.standard.string(forKey: Self.libraryKey) != nil }
+
+    /// Changing folders mid-transfer would split a session across two libraries.
+    var canChangeLibrary: Bool { !isLive && !importState.isActive }
+
     func setLibraryRoot(_ url: URL) {
         UserDefaults.standard.set(url.path, forKey: Self.libraryKey)
         library = PhotoLibrary(root: url)
         selectedDay = nil
         reloadDays()
+    }
+
+    /// Lets the user pick a folder, starting from `start`.
+    func chooseFolder(startingAt start: URL, prompt: String) -> URL? {
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.directoryURL = FileManager.default.fileExists(atPath: start.path) ? start : start.deletingLastPathComponent()
+        panel.prompt = prompt
+        panel.message = "Shutterdrop keeps a folder per day inside, with previews and originals."
+        return panel.runModal() == .OK ? panel.url : nil
+    }
+
+    /// Choose a new library folder and offer to bring the existing photos along.
+    func changeLibraryFolder() {
+        guard canChangeLibrary, let url = chooseFolder(startingAt: library.root, prompt: "Use Folder") else { return }
+        adoptLibraryFolder(url)
+    }
+
+    /// Switches to `url`, offering to move the photos already in the current
+    /// folder. Returns false if the user cancelled.
+    @discardableResult
+    func adoptLibraryFolder(_ url: URL) -> Bool {
+        let (files, bytes) = library.contentsSummary()
+        guard url.standardizedFileURL != library.root.standardizedFileURL, files > 0 else {
+            setLibraryRoot(url)
+            return true
+        }
+
+        let alert = NSAlert()
+        alert.messageText = "Move your existing photos?"
+        alert.informativeText = """
+            \(files) file(s), \(ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)), are in \(library.root.path).
+            Move them to \(url.path)? If you don't, they stay where they are and the app shows only the new folder.
+            """
+        alert.addButton(withTitle: "Move Photos")
+        alert.addButton(withTitle: "Don't Move")
+        alert.addButton(withTitle: "Cancel")
+        switch alert.runModal() {
+        case .alertFirstButtonReturn:
+            moveLibrary(to: url)
+            return true
+        case .alertSecondButtonReturn:
+            setLibraryRoot(url)
+            return true
+        default:
+            return false
+        }
+    }
+
+    private(set) var isMovingLibrary = false
+
+    private func moveLibrary(to url: URL) {
+        isMovingLibrary = true
+        let library = library
+        Task {
+            defer { isMovingLibrary = false }
+            do {
+                try await Self.move(library, to: url)
+                setLibraryRoot(url)
+            } catch {
+                // Whatever moved is in the new folder; whatever didn't is still in the old one.
+                let alert = NSAlert()
+                alert.messageText = "Couldn't move all photos"
+                alert.informativeText = "\(error.localizedDescription)\n\nThe app still uses \(library.root.path)."
+                alert.runModal()
+                reloadDays()
+            }
+        }
+    }
+
+    @concurrent
+    private static func move(_ library: PhotoLibrary, to url: URL) async throws {
+        try library.moveContents(to: url)
     }
 
     func reloadDays() {
@@ -245,6 +331,116 @@ final class AppModel {
             importState = .copying(index: index, count: count, name: photo.url.lastPathComponent)
             if library.dayFolder(photo.captured) == selectedDay { reloadShots() }
         }
+    }
+
+    // MARK: - Pairing
+
+    /// Runs `sdprobe pair` (bundled next to the app) as root: macOS asks for an
+    /// administrator password, which taking the camera from the storage driver needs.
+    /// Checks the camera first and reports the outcome in an alert.
+    func pairCamera() {
+        guard pairState != .pairing else { return }
+        guard let tool = Bundle.main.url(forAuxiliaryExecutable: "sdprobe") else {
+            return finishPairing(.failed("sdprobe is missing from the app bundle; rebuild with scripts/build-app.sh."))
+        }
+
+        let camera = CameraPairing.connectedCamera()
+        guard camera.found else {
+            return finishPairing(.failed("No Sony camera found on USB. Connect it with a cable and turn it on."))
+        }
+        guard camera.massStorage else {
+            return finishPairing(.failed("The camera is connected but not in Mass Storage mode. On the camera choose MENU → Setup → USB Connection → Mass Storage, then reconnect the cable."))
+        }
+
+        let confirm = NSAlert()
+        confirm.messageText = "Pair the camera with this Mac?"
+        confirm.informativeText = """
+            The camera is connected in Mass Storage mode. If its disk is showing in Finder, eject it first (keep the cable in).
+
+            macOS will ask for an administrator password. The camera's disk disappears briefly while pairing.
+            """
+        confirm.addButton(withTitle: "Pair")
+        confirm.addButton(withTitle: "Cancel")
+        guard confirm.runModal() == .alertFirstButtonReturn else { return }
+
+        pairState = .pairing
+        Task {
+            do {
+                let guid = ClientIdentity.hex(try ClientIdentity.guid())
+                let (ok, output) = await Self.runAsAdministrator(tool, arguments: ["pair", "--guid", guid])
+                finishPairing(ok ? .paired : .failed(Self.pairingFailure(output)), details: output)
+            } catch {
+                finishPairing(.failed(String(describing: error)))
+            }
+        }
+    }
+
+    private func finishPairing(_ state: PairState, details: String = "") {
+        pairState = state
+        let alert = NSAlert()
+        switch state {
+        case .paired:
+            alert.messageText = "Camera paired"
+            alert.informativeText = "Unplug the camera and set USB Connection back to what it was. Send to Computer will now connect to Shutterdrop."
+        case let .failed(message):
+            alert.alertStyle = .warning
+            alert.messageText = message == "Cancelled." ? "Pairing cancelled" : "Pairing failed"
+            alert.informativeText = message
+            if !details.isEmpty, message != "Cancelled." {
+                let text = NSTextView(frame: NSRect(x: 0, y: 0, width: 420, height: 120))
+                text.string = details.replacingOccurrences(of: "\r", with: "\n")
+                text.isEditable = false
+                text.font = .monospacedSystemFont(ofSize: 11, weight: .regular)
+                let scroll = NSScrollView(frame: text.frame)
+                scroll.documentView = text
+                scroll.hasVerticalScroller = true
+                alert.accessoryView = scroll
+            }
+        default:
+            return
+        }
+        alert.runModal()
+    }
+
+    @concurrent
+    private static func runAsAdministrator(_ tool: URL, arguments: [String]) async -> (ok: Bool, output: String) {
+        // Paths and arguments go in as argv and are quoted by AppleScript itself.
+        let script = """
+            on run argv
+                set command to quoted form of item 1 of argv
+                repeat with argument in rest of argv
+                    set command to command & " " & quoted form of argument
+                end repeat
+                do shell script command & " 2>&1" with administrator privileges
+            end run
+            """
+        let process = Process()
+        process.executableURL = URL(filePath: "/usr/bin/osascript")
+        // "with administrator privileges" runs commands outside the user's login
+        // session, where opening the camera's USB interface fails (IOUSBHost
+        // internal error). `launchctl asuser` brings it back into the session.
+        let inSession = ["/bin/launchctl", "asuser", String(getuid()), tool.path]
+        process.arguments = ["-e", script] + inSession + arguments
+        let pipe = Pipe()
+        process.standardOutput = pipe
+        process.standardError = pipe
+        do {
+            try process.run()
+        } catch {
+            return (false, String(describing: error))
+        }
+        let output = String(decoding: pipe.fileHandleForReading.readDataToEndOfFile(), as: UTF8.self)
+        process.waitUntilExit()
+        return (process.terminationStatus == 0, output)
+    }
+
+    /// The useful line from sdprobe's or osascript's output.
+    private static func pairingFailure(_ output: String) -> String {
+        if output.contains("-128") { return "Cancelled." }
+        // AppleScript turns line breaks into carriage returns.
+        let lines = output.split(whereSeparator: \.isNewline).map(String.init)
+        let message = lines.last { $0.contains("sdprobe:") } ?? lines.last ?? output
+        return message.replacingOccurrences(of: #"^.*sdprobe: "#, with: "", options: .regularExpression)
     }
 
     private func notify(_ title: String, _ body: String) {

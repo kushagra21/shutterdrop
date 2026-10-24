@@ -108,3 +108,23 @@ private func photo(_ path: String, _ captured: Date?) -> Photo {
     let matches = ShotMatcher.match(previews: previews, originals: originals)
     #expect(matches.map { $0.originals.map(\.url.lastPathComponent) } == [["DSC04662.JPG"], ["DSC04664.JPG"]])
 }
+
+@Test func movesLibraryAndMergesDays() throws {
+    let base = FileManager.default.temporaryDirectory.appending(path: "shutterdrop-move-\(UUID())")
+    defer { try? FileManager.default.removeItem(at: base) }
+    let old = PhotoLibrary(root: base.appending(path: "old"))
+    let new = PhotoLibrary(root: base.appending(path: "new"))
+    let day1 = date(23, 10, 0, 0)
+    let day2 = date(24, 10, 0, 0)
+    _ = try old.addOriginal([1], named: "A.JPG", captured: day1)
+    _ = try old.addOriginal([2], named: "B.JPG", captured: day2)
+    _ = try old.addOriginal([3], named: "C.JPG", captured: day2)
+    _ = try new.addOriginal([9], named: "C.JPG", captured: day2)  // already there: kept as is
+
+    #expect(old.contentsSummary().files == 3)
+    #expect(try old.moveContents(to: new.root) == 2)
+    #expect(new.originals(inDay: new.dayFolder(day1)).map(\.url.lastPathComponent) == ["A.JPG"])
+    #expect(new.originals(inDay: new.dayFolder(day2)).map(\.url.lastPathComponent) == ["B.JPG", "C.JPG"])
+    #expect(try Data(contentsOf: new.dayFolder(day2).appending(path: "originals/C.JPG")) == Data([9]))
+    #expect(throws: (any Error).self) { try new.moveContents(to: new.root.appending(path: "inside")) }
+}

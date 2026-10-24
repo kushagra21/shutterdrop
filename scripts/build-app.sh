@@ -10,11 +10,14 @@ out="${1:-build}"
 app="$out/Shutterdrop.app"
 
 swift build -c release --product Shutterdrop
-bin="$(swift build -c release --product Shutterdrop --show-bin-path)/Shutterdrop"
+swift build -c release --product sdprobe
+bin="$(swift build -c release --show-bin-path)"
 
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-cp "$bin" "$app/Contents/MacOS/Shutterdrop"
+cp "$bin/Shutterdrop" "$app/Contents/MacOS/Shutterdrop"
+# Pairing runs this as root via the administrator prompt.
+cp "$bin/sdprobe" "$app/Contents/MacOS/sdprobe"
 
 cat > "$app/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
@@ -38,5 +41,6 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
 </plist>
 PLIST
 
+codesign --force --sign - "$app/Contents/MacOS/sdprobe"
 codesign --force --sign - "$app"
 echo "Built $app"

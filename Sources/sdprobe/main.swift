@@ -27,6 +27,10 @@ let usage = """
           to N seconds (default 120) for the camera to announce itself.
           --since only copies files the camera dated at or after that day/time;
           --dry-run lists what would be copied without copying.
+      sudo sdprobe pair [--guid HEX]
+          One-time USB pairing so Send to Computer talks to this Mac. Camera on
+          USB Connection → Mass Storage, plugged in (eject its disk first).
+          Uses your Shutterdrop ID unless --guid is given.
       --out DIR defaults to ~/Pictures/Shutterdrop.
     """
 
@@ -209,6 +213,35 @@ func describeFound(total: Int, new: [PendingFile], listing: Bool) -> String {
     return text
 }
 
+// MARK: - pair
+
+/// The ID to pair: --guid, else the invoking user's (pairing runs under sudo,
+/// where the home folder is root's), else this user's.
+func pairingGUID(_ hex: String?) throws -> [UInt8] {
+    if let hex {
+        guard let guid = ClientIdentity.parseHex(hex) else { fail("--guid must be 32 hex digits") }
+        return guid
+    }
+    if getuid() == 0, let user = ProcessInfo.processInfo.environment["SUDO_USER"],
+       let home = FileManager.default.homeDirectory(forUser: user) {
+        guard let data = try? Data(contentsOf: ClientIdentity.file(inHome: home)), data.count == 16 else {
+            fail("\(user) has no Shutterdrop ID yet; open the app or run `sdprobe import` once, or pass --guid")
+        }
+        return [UInt8](data)
+    }
+    // As root without sudo there's no way to know whose ID to use, and a fresh
+    // root-owned ID would pair the camera with an ID the app never presents.
+    guard getuid() != 0 else { fail("running as root without sudo: pass --guid (your ID is in ~/Library/Application Support/Shutterdrop/client-guid)") }
+    return try ClientIdentity.guid()
+}
+
+func runPair(guidHex: String?) throws {
+    let guid = try pairingGUID(guidHex)
+    log("Pairing the camera with Shutterdrop ID \(ClientIdentity.hex(guid))")
+    try CameraPairing.pair(guid: guid, name: ClientIdentity.name, log: log)
+    log("Paired. Unplug the camera, then choose Network → Send to Computer.")
+}
+
 // MARK: - arguments
 
 var arguments = Array(CommandLine.arguments.dropFirst())
@@ -277,6 +310,11 @@ do {
         let dryRun = flag("--dry-run")
         guard arguments.count <= 1 else { fail("import takes at most one camera IP address\n\n\(usage)") }
         try await runImport(host: arguments.first, port: port, wait: wait, library: library, allFormats: allFormats, since: since, dryRun: dryRun)
+    case "pair":
+        arguments.removeFirst()
+        let guidHex = option("--guid")
+        guard arguments.isEmpty else { fail("unexpected arguments: \(arguments.joined(separator: " "))\n\n\(usage)") }
+        try runPair(guidHex: guidHex)
     case "-h", "--help", "help":
         print(usage)
     default:

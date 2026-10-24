@@ -6,19 +6,42 @@ struct ShutterdropApp: App {
     @NSApplicationDelegateAdaptor private var delegate: AppDelegate
     @State private var model = AppModel()
     @AppStorage("hasSeenGuide") private var hasSeenGuide = false
-    @State private var showingGuide = false
+    @State private var firstRunSheet: FirstRunSheet?
+
+    /// First run: choose the photo folder, then the camera guide.
+    enum FirstRunSheet: Identifiable {
+        case folder, guide
+        var id: Self { self }
+    }
 
     var body: some Scene {
         Window("Shutterdrop", id: "main") {
             ContentView()
                 .environment(model)
                 .frame(minWidth: 900, minHeight: 560)
-                .sheet(isPresented: $showingGuide) { GuideView { showingGuide = false } }
-                .onAppear { if !hasSeenGuide { showingGuide = true; hasSeenGuide = true } }
+                .sheet(item: $firstRunSheet) { sheet in
+                    switch sheet {
+                    case .folder:
+                        FolderSetupView { firstRunSheet = hasSeenGuide ? nil : .guide }
+                            .environment(model)
+                            .interactiveDismissDisabled()
+                    case .guide:
+                        GuideView { firstRunSheet = nil; hasSeenGuide = true }
+                    }
+                }
+                .onAppear {
+                    if !model.isLibraryConfigured { firstRunSheet = .folder }
+                    else if !hasSeenGuide { firstRunSheet = .guide }
+                }
         }
         .commands {
             CommandGroup(replacing: .help) {
-                Button("Camera Setup Guide") { showingGuide = true }
+                Button("Camera Setup Guide") { firstRunSheet = .guide }
+            }
+            CommandGroup(after: .newItem) {
+                Button("Change Photo Folder…") { model.changeLibraryFolder() }
+                    .disabled(!model.canChangeLibrary)
+                Button("Show Photo Folder in Finder") { model.revealInFinder([model.library.root]) }
             }
             CommandMenu("Camera") {
                 Button(model.isLive ? "Stop Live Previews" : "Start Live Previews") {
@@ -27,6 +50,8 @@ struct ShutterdropApp: App {
                 .keyboardShortcut("l", modifiers: .command)
                 Button("Import Full-Size Files…") { model.showingImport = true }
                     .keyboardShortcut("i", modifiers: [.command, .shift])
+                Divider()
+                Button("Pair Camera over USB…") { model.pairCamera() }
             }
         }
 

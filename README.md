@@ -19,9 +19,12 @@ scripts/build-app.sh && open build/Shutterdrop.app   # the Dock app
 
 In the app: **Start Live** while shooting (camera on Ctrl w/ Smartphone, Mac on
 the camera's `DIRECT-…` Wi-Fi), then **Import Full-Size** afterwards (Mac back on
-home Wi-Fi, camera on Send to Computer). Photos go to
-`~/Pictures/Shutterdrop/<date>/previews` and `/originals`, dated by the
-camera's clock. Allow Local Network access when macOS asks.
+home Wi-Fi, camera on Send to Computer). On first run the app asks where to
+save photos (default `~/Pictures/Shutterdrop`); the sidebar footer shows the
+folder and can change it, moving existing photos if you like. Inside, photos go
+to `<date>/previews` and `<date>/originals`, dated by the camera's clock.
+Pair the camera from Camera → Pair Camera over USB. Allow Local Network access
+when macOS asks.
 
 The same flow from the command line:
 
@@ -35,22 +38,21 @@ The same flow from the command line:
 ## Pairing (one time, USB)
 
 Send to Computer refuses to start ("computer information not set") until a
-computer is registered on the camera over USB. Shutterdrop doesn't do this
-itself yet; until it does, use sony-pm-alt's `sony-guid-setter` with
-Shutterdrop's ID:
+computer is registered on the camera over USB.
 
-1. `brew install libusb`, then compile
-   [`sony-guid-setter.c`](https://github.com/falk0069/sony-pm-alt) with its
-   `guid1`/`guid2` bytes replaced by the 16 bytes in
-   `~/Library/Application Support/Shutterdrop/client-guid` (created by the
-   first `sdprobe connect`/`import` or app import; `xxd -p` shows them).
-   `clang -I$(brew --prefix libusb)/include -L$(brew --prefix libusb)/lib -lusb-1.0 sony-guid-setter.c -o sony-guid-setter`
-2. Camera: MENU → Setup → USB Connection → **Mass Storage**; plug it in, eject
-   the disk in Finder, keep the cable connected.
-3. `sudo ./sony-guid-setter -g 054c:0c02` (the A7 III's USB ID). Success is
-   `Mass Storage Status: 00 (Success)`.
+1. Camera: MENU → Setup → USB Connection → **Mass Storage**; plug it in and
+   eject its disks in Finder, keeping the cable connected.
+2. In the app: **Camera → Pair Camera over USB…** (asks for an administrator
+   password), or from Terminal: `sudo .build/debug/sdprobe pair`.
+3. Unplug and set USB Connection back.
 
-Don't delete `client-guid`: a new ID means pairing again.
+Pairing registers the ID in `~/Library/Application Support/Shutterdrop/client-guid`;
+don't delete that file, or the camera has to be paired again. The protocol (a
+vendor SCSI command 0x7A plus an 8 KB block with the name and ID) was
+reverse-engineered by Clemens Fruhwirth for sony-pm-alt's `sony-guid-setter`;
+Shutterdrop reimplements it with IOUSBHost. It needs root, and when launched
+through AppleScript's administrator prompt it must run via
+`launchctl asuser <uid>`, or opening the USB interface fails.
 
 ## How it will work
 

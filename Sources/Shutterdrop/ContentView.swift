@@ -99,9 +99,10 @@ struct DayList: View {
         }
         .overlay {
             if model.days.isEmpty {
-                Text("No photos in\n\(model.library.root.path)").font(.caption).foregroundStyle(.secondary).multilineTextAlignment(.center).padding()
+                Text("No photos yet").font(.caption).foregroundStyle(.secondary).padding()
             }
         }
+        .safeAreaInset(edge: .bottom) { LibraryFooter() }
     }
 
     static func title(_ day: URL) -> String {
@@ -109,6 +110,46 @@ struct DayList: View {
         if Calendar.current.isDateInToday(date) { return "Today" }
         if Calendar.current.isDateInYesterday(date) { return "Yesterday" }
         return date.formatted(date: .abbreviated, time: .omitted)
+    }
+}
+
+/// Where photos are being saved, always visible under the day list.
+struct LibraryFooter: View {
+    @Environment(AppModel.self) private var model
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text("Saving to").font(.caption).foregroundStyle(.secondary)
+            HStack(spacing: 6) {
+                Image(systemName: "folder.fill").foregroundStyle(.tint)
+                Text(Self.displayPath(model.library.root))
+                    .font(.callout).lineLimit(1).truncationMode(.head)
+                Spacer(minLength: 0)
+                Menu {
+                    Button("Show in Finder") { model.revealInFinder([model.library.root]) }
+                    Button("Change Folder…") { model.changeLibraryFolder() }
+                        .disabled(!model.canChangeLibrary)
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                }
+                .menuStyle(.borderlessButton)
+                .menuIndicator(.hidden)
+                .fixedSize()
+            }
+            if model.isMovingLibrary {
+                ProgressView("Moving photos…").controlSize(.small).font(.caption)
+            }
+        }
+        .help(model.library.root.path)
+        .padding(10)
+        .contentShape(Rectangle())
+        .onTapGesture(count: 2) { model.revealInFinder([model.library.root]) }
+    }
+
+    /// `~/Pictures/Shutterdrop` rather than the full home path.
+    static func displayPath(_ url: URL) -> String {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        return url.path.hasPrefix(home + "/") ? "~" + url.path.dropFirst(home.count) : url.path
     }
 }
 

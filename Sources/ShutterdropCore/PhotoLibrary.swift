@@ -53,6 +53,53 @@ public struct PhotoLibrary: Sendable {
         return Photo(url: destination, captured: captured)
     }
 
+    /// Number of photo files and their total size, for "move existing photos?".
+    public func contentsSummary() -> (files: Int, bytes: Int64) {
+        var files = 0
+        var bytes: Int64 = 0
+        for day in days() {
+            for photo in previews(inDay: day) + originals(inDay: day) {
+                files += 1
+                bytes += Int64((try? photo.url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
+            }
+        }
+        return (files, bytes)
+    }
+
+    /// Moves every day folder into `newRoot`, merging with days already there.
+    /// Files that already exist at the destination are left in place, not
+    /// overwritten. Returns how many files moved.
+    @discardableResult
+    public func moveContents(to newRoot: URL) throws -> Int {
+        let source = root.standardizedFileURL.resolvingSymlinksInPath().path
+        let destination = newRoot.standardizedFileURL.resolvingSymlinksInPath().path
+        guard source != destination else { return 0 }
+        guard !destination.hasPrefix(source + "/") else {
+            throw CocoaError(.fileWriteInvalidFileName, userInfo: [NSLocalizedDescriptionKey: "The new folder is inside the current one."])
+        }
+        let fileManager = FileManager.default
+        try fileManager.createDirectory(at: newRoot, withIntermediateDirectories: true)
+        var moved = 0
+        for day in days() {
+            let target = newRoot.appending(path: day.lastPathComponent)
+            if !fileManager.fileExists(atPath: target.path) {
+                let count = files(in: day.appending(path: "previews")).count + files(in: day.appending(path: "originals")).count
+                try fileManager.moveItem(at: day, to: target)
+                moved += count
+                continue
+            }
+            for kind in ["previews", "originals"] {
+                let folder = target.appending(path: kind)
+                try fileManager.createDirectory(at: folder, withIntermediateDirectories: true)
+                for file in files(in: day.appending(path: kind)) where !fileManager.fileExists(atPath: folder.appending(path: file.lastPathComponent).path) {
+                    try fileManager.moveItem(at: file, to: folder.appending(path: file.lastPathComponent))
+                    moved += 1
+                }
+            }
+        }
+        return moved
+    }
+
     /// Day folders, newest first.
     public func days() -> [URL] {
         let folders = (try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: [.isDirectoryKey])) ?? []
