@@ -10,7 +10,10 @@ public struct ShotMatch: Equatable, Sendable {
 /// Previews only carry whole seconds, so in a burst within one second the
 /// previews and shots are paired in order.
 public enum ShotMatcher {
-    public static func match(previews: [Photo], originals: [Photo], tolerance: TimeInterval = 2) -> [ShotMatch] {
+    /// The camera names a preview 1–2 s after the shot (measured on the A7 III),
+    /// so an original may be up to `before` seconds older than its preview but
+    /// only `after` seconds newer (rounding).
+    public static func match(previews: [Photo], originals: [Photo], before: TimeInterval = 4, after: TimeInterval = 1) -> [ShotMatch] {
         // One shot = all originals sharing a base name (DSC01234.JPG + DSC01234.ARW).
         let shots = Dictionary(grouping: originals.filter { $0.captured != nil }) {
             $0.url.deletingPathExtension().lastPathComponent
@@ -24,7 +27,10 @@ public enum ShotMatcher {
             .map { preview in
                 guard let time = preview.captured else { return ShotMatch(preview: preview, originals: []) }
                 let best = shots.indices
-                    .filter { !claimed.contains($0) && abs(shots[$0].time.timeIntervalSince(time)) <= tolerance }
+                    .filter { index in
+                        let offset = shots[index].time.timeIntervalSince(time)
+                        return !claimed.contains(index) && offset >= -before && offset <= after
+                    }
                     .min { abs(shots[$0].time.timeIntervalSince(time)) < abs(shots[$1].time.timeIntervalSince(time)) }
                 guard let best else { return ShotMatch(preview: preview, originals: []) }
                 claimed.insert(best)

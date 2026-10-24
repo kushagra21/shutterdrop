@@ -93,3 +93,18 @@ private func photo(_ path: String, _ captured: Date?) -> Photo {
     #expect(shots[1].preview == nil)
     #expect(shots[2].originals.map(\.url.lastPathComponent) == ["DSC00010.ARW", "DSC00010.JPG"])
 }
+
+@Test func previewLagsBehindShot() {
+    // Real pairs from the A7 III: previews are named 1-2 s after the capture.
+    let previews = [
+        photo("pict261024_1415470000.JPG", date(24, 14, 15, 47)),
+        photo("pict261024_1416460000.JPG", date(24, 14, 16, 46)),
+    ]
+    let originals = [
+        photo("DSC04662.JPG", date(24, 14, 15, 46)),
+        photo("DSC04664.JPG", date(24, 14, 16, 44)),
+        photo("DSC04699.JPG", date(24, 14, 16, 49)),  // 3 s after the preview: a later shot
+    ]
+    let matches = ShotMatcher.match(previews: previews, originals: originals)
+    #expect(matches.map { $0.originals.map(\.url.lastPathComponent) } == [["DSC04662.JPG"], ["DSC04664.JPG"]])
+}
