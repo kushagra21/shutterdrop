@@ -44,7 +44,7 @@ doesn't support it. Shutterdrop combines two Wi-Fi modes the camera does have:
 ## Quick start
 
 ```sh
-git clone https://github.com/<you>/shutterdrop.git
+git clone https://github.com/kushagra21/shutterdrop.git
 cd shutterdrop
 scripts/build-app.sh
 open build/Shutterdrop.app
@@ -73,6 +73,14 @@ exact camera menus, plus troubleshooting.
 - **Set the camera's clock right.** Matching and day folders use the camera's
   time. Adjust Dates fixes photos taken with a wrong clock in Shutterdrop's
   library, but not inside the files (EXIF).
+
+## Use at your own risk
+
+Shutterdrop is an independent tool that talks to the camera through
+interfaces Sony doesn't document for this purpose. Pairing sends a vendor
+command over USB that registers your Mac on the camera. It worked reliably in
+testing, but there's no warranty (see the [license](LICENSE)). Keep your
+photos backed up, and use a charged battery.
 
 ## Roadmap
 

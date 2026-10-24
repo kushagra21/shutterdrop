@@ -36,7 +36,7 @@ Computer.
 Open **Terminal** (Applications → Utilities) and run:
 
 ```sh
-git clone https://github.com/<you>/shutterdrop.git
+git clone https://github.com/kushagra21/shutterdrop.git
 cd shutterdrop
 scripts/build-app.sh
 open build/Shutterdrop.app
@@ -89,6 +89,11 @@ Do this once.
 The camera only sends files to a computer it has been introduced to over USB.
 Without this step, Send to Computer says *"the information of the computer is
 not set"*.
+
+> **Use at your own risk.** Pairing sends a vendor command that Sony doesn't
+> document for this use. It registers your Mac on the camera, just as Sony's
+> own software does. It worked reliably in testing, but Shutterdrop comes with
+> no warranty. Use a charged battery and don't unplug the camera while pairing.
 
 1. On the camera: **MENU → Setup → USB Connection → Mass Storage**.
 2. Connect the camera to the Mac with the USB cable and turn it on.
