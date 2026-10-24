@@ -52,21 +52,6 @@ func params(_ values: [UInt32]) -> String {
     values.isEmpty ? "" : " [" + values.map(PTPCode.hex).joined(separator: ", ") + "]"
 }
 
-/// A stable GUID for this Mac, so the camera sees the same initiator every time.
-func loadOrCreateGUID() throws -> [UInt8] {
-    let folder = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-        .appending(path: "Shutterdrop")
-    let file = folder.appending(path: "client-guid")
-    if let data = try? Data(contentsOf: file), data.count == 16 {
-        return [UInt8](data)
-    }
-    let uuid = UUID().uuid
-    let guid = withUnsafeBytes(of: uuid) { Array($0) }
-    try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-    try Data(guid).write(to: file)
-    return guid
-}
-
 // MARK: - discover
 
 @MainActor func runDiscover(seconds: Double) async throws {
@@ -104,7 +89,7 @@ func loadOrCreateGUID() throws -> [UInt8] {
 // MARK: - connect
 
 @MainActor func runConnect(host: String, port: UInt16, name: String, sonySDIO: Bool) async throws {
-    let client = PTPIPClient(host: host, port: port, guid: try loadOrCreateGUID(), name: name)
+    let client = PTPIPClient(host: host, port: port, guid: try ClientIdentity.guid(), name: name)
     log("Connecting to \(host):\(port) as \"\(name)\"… (if the camera asks to allow this Mac, accept)")
     let hello = try await client.connect()
     log("Connected to \"\(hello.name)\": connection #\(hello.connectionNumber), GUID \(hex(hello.guid)), protocol \(PTPCode.hex(hello.protocolVersion))")
@@ -173,27 +158,20 @@ func loadOrCreateGUID() throws -> [UInt8] {
 
 // MARK: - import
 
-/// Waits for a camera in Send to Computer mode to announce itself (MtpNullService over SSDP).
-@MainActor func waitForSendToComputer(seconds: Double) async throws -> String? {
-    log("Waiting up to \(Int(seconds)) s. Choose Network → Send to Computer on the camera.")
-    let found = OSAllocatedUnfairLock<String?>(initialState: nil)
-    try await SSDP.discover(seconds: seconds, searchTarget: "urn:microsoft-com:service:MtpNullService:1") { message in
-        guard message.looksLikeSonyCamera, message.headers.values.contains(where: { $0.contains("MtpNullService") }) else { return false }
-        found.withLock { $0 = message.sender }
-        return true
-    }
-    return found.withLock { $0 }
-}
-
 @MainActor func runImport(host: String?, port: UInt16, wait: Double, library: PhotoLibrary, allFormats: Bool, since: Date?, dryRun: Bool) async throws {
     var host = host
-    if host == nil { host = try await waitForSendToComputer(seconds: wait) }
+    if host == nil {
+        log("Waiting up to \(Int(wait)) s. Choose Network → Send to Computer on the camera.")
+        host = try await CardImporter.waitForCamera(seconds: wait)
+    }
     guard let host else {
         fail("no camera announced itself; is Send to Computer running and the camera on this Wi-Fi?")
     }
     log("Importing from \(host) into \(library.root.path)")
-    let importer = CardImporter(library: library, formats: allFormats ? [] : CardImporter.defaultFormats, since: since, dryRun: dryRun)
-    let saved = try await importer.run(host: host, port: port, guid: try loadOrCreateGUID(), name: "Shutterdrop") { update in
+    let importer = CardImporter(library: library, formats: allFormats ? [] : CardImporter.defaultFormats, since: since)
+    let saved = try await importer.run(
+        host: host, port: port, guid: try ClientIdentity.guid(), name: ClientIdentity.name, confirm: { _ in !dryRun }
+    ) { update in
         let message = switch update {
         case let .connected(model): "Connected to \(model)"
         case let .found(total, new): describeFound(total: total, new: new, listing: dryRun)
@@ -215,9 +193,10 @@ func loadOrCreateGUID() throws -> [UInt8] {
     }
 }
 
-func describeFound(total: Int, new: [(name: String, captured: Date?)], listing: Bool) -> String {
+func describeFound(total: Int, new: [PendingFile], listing: Bool) -> String {
     let dates = new.compactMap(\.captured)
-    var text = "\(total) matching file(s) on the camera, \(new.count) new"
+    let megabytes = new.reduce(0) { $0 + $1.size } / 1_000_000
+    var text = "\(total) matching file(s) on the camera, \(new.count) new (\(megabytes) MB)"
     if let first = dates.min(), let last = dates.max() {
         text += ", camera dates \(first.formatted(date: .numeric, time: .shortened)) – \(last.formatted(date: .numeric, time: .shortened))"
     }

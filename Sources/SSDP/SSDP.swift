@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import os
 
 /// One SSDP message seen on the network: a reply to our search, or a NOTIFY or
 /// M-SEARCH multicast by another device.
@@ -62,25 +63,35 @@ public enum SSDP {
     public static let port: UInt16 = 1900
 
     /// Sends M-SEARCH a few times and reports every SSDP message received for
-    /// `seconds`, or until `onMessage` returns true. Also listens on port 1900
-    /// for NOTIFY/M-SEARCH from other devices when that port can be shared.
-    /// Returns whether it could.
+    /// `seconds`, until `onMessage` returns true, or until the task is
+    /// cancelled. Also listens on port 1900 for NOTIFY/M-SEARCH from other
+    /// devices when that port can be shared. Returns whether it could.
     @discardableResult
     public static func discover(
         seconds: Double,
         searchTarget: String = "ssdp:all",
         onMessage: @escaping @Sendable (SSDPMessage) -> Bool
     ) async throws -> Bool {
-        try await withCheckedThrowingContinuation { continuation in
-            DispatchQueue.global(qos: .userInitiated).async {
-                continuation.resume(with: Result {
-                    try run(seconds: seconds, searchTarget: searchTarget, onMessage: onMessage)
-                })
+        let cancelled = OSAllocatedUnfairLock(initialState: false)
+        return try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { continuation in
+                DispatchQueue.global(qos: .userInitiated).async {
+                    continuation.resume(with: Result {
+                        try run(seconds: seconds, searchTarget: searchTarget, isCancelled: { cancelled.withLock { $0 } }, onMessage: onMessage)
+                    })
+                }
             }
+        } onCancel: {
+            cancelled.withLock { $0 = true }
         }
     }
 
-    private static func run(seconds: Double, searchTarget: String, onMessage: (SSDPMessage) -> Bool) throws -> Bool {
+    private static func run(
+        seconds: Double,
+        searchTarget: String,
+        isCancelled: () -> Bool,
+        onMessage: (SSDPMessage) -> Bool
+    ) throws -> Bool {
         let fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)
         guard fd >= 0 else { throw SSDPError.socket("socket", errno) }
         defer { close(fd) }
@@ -120,7 +131,7 @@ public enum SSDP {
         let start = Date()
         var searchesSent = 0
         var buffer = [UInt8](repeating: 0, count: 8192)
-        while Date().timeIntervalSince(start) < seconds {
+        while Date().timeIntervalSince(start) < seconds, !isCancelled() {
             // Repeat the search at 0 s, 1 s and 2 s; UDP multicast is lossy.
             if searchesSent < 3, Date().timeIntervalSince(start) >= Double(searchesSent) {
                 try send(search, from: fd)

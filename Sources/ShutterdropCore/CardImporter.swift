@@ -1,13 +1,23 @@
 import Foundation
+import os
 import PTPIP
+import SSDP
+
+/// A file on the card that the library doesn't have yet.
+public struct PendingFile: Equatable, Sendable {
+    public var name: String
+    /// Camera clock.
+    public var captured: Date?
+    public var size: UInt64
+}
 
 /// Copies full-size files off the camera in Send to Computer mode (PTP/IP),
 /// skipping files the library already has.
 public struct CardImporter: Sendable {
     public enum Update: Sendable {
         case connected(model: String)
-        /// `new` lists the files about to be copied: name and camera capture time.
-        case found(total: Int, new: [(name: String, captured: Date?)])
+        /// The card has been read; `new` is what will be copied if confirmed.
+        case found(total: Int, new: [PendingFile])
         case saved(Photo, index: Int, count: Int)
     }
 
@@ -20,22 +30,37 @@ public struct CardImporter: Sendable {
     public let formats: Set<UInt16>
     /// Only copy files the camera dated at or after this (camera clock); nil = all.
     public let since: Date?
-    /// List what would be copied without copying it.
-    public let dryRun: Bool
 
-    public init(library: PhotoLibrary, formats: Set<UInt16> = defaultFormats, since: Date? = nil, dryRun: Bool = false) {
+    public init(library: PhotoLibrary, formats: Set<UInt16> = defaultFormats, since: Date? = nil) {
         self.library = library
         self.formats = formats
         self.since = since
-        self.dryRun = dryRun
     }
 
+    /// Waits for a camera in Send to Computer mode to announce itself
+    /// (MtpNullService over SSDP) and returns its address.
+    public static func waitForCamera(seconds: Double) async throws -> String? {
+        let found = OSAllocatedUnfairLock<String?>(initialState: nil)
+        try await SSDP.discover(seconds: seconds, searchTarget: "urn:microsoft-com:service:MtpNullService:1") { message in
+            guard message.looksLikeSonyCamera,
+                  message.headers.values.contains(where: { $0.contains("MtpNullService") }) else { return false }
+            found.withLock { $0 = message.sender }
+            return true
+        }
+        try Task.checkCancellation()
+        return found.withLock { $0 }
+    }
+
+    /// Copies new files. `confirm` sees the list first and can decline (a dry
+    /// run). Cancelling the task stops after the file in progress and still
+    /// signs off with the camera.
     @discardableResult
     public func run(
         host: String,
         port: UInt16 = PTPIPClient.defaultPort,
         guid: [UInt8],
         name: String,
+        confirm: @Sendable ([PendingFile]) async -> Bool = { _ in true },
         onUpdate: @Sendable (Update) -> Void
     ) async throws -> [Photo] {
         let client = PTPIPClient(host: host, port: port, guid: guid, name: name)
@@ -52,7 +77,7 @@ public struct CardImporter: Sendable {
             }
         }
         do {
-            let photos = try await importAll(client, onUpdate: onUpdate)
+            let photos = try await importAll(client, confirm: confirm, onUpdate: onUpdate)
             try? await client.closeSession()
             await client.disconnect()
             return photos
@@ -62,7 +87,11 @@ public struct CardImporter: Sendable {
         }
     }
 
-    private func importAll(_ client: PTPIPClient, onUpdate: @Sendable (Update) -> Void) async throws -> [Photo] {
+    private func importAll(
+        _ client: PTPIPClient,
+        confirm: @Sendable ([PendingFile]) async -> Bool,
+        onUpdate: @Sendable (Update) -> Void
+    ) async throws -> [Photo] {
         let info = try await client.getDeviceInfo()
         try await client.openSession()
         onUpdate(.connected(model: info.model))
@@ -75,7 +104,7 @@ public struct CardImporter: Sendable {
         if sonyTransferControl {
             try await sonyTransfer(client, message: Self.sonyStartMessage)
         }
-        let saved = try await copyNewFiles(client, onUpdate: onUpdate)
+        let saved = try await copyNewFiles(client, confirm: confirm, onUpdate: onUpdate)
         if sonyTransferControl {
             try await sonyTransfer(client, message: Self.sonyFinishMessage)
         }
@@ -97,7 +126,11 @@ public struct CardImporter: Sendable {
         }
     }
 
-    private func copyNewFiles(_ client: PTPIPClient, onUpdate: @Sendable (Update) -> Void) async throws -> [Photo] {
+    private func copyNewFiles(
+        _ client: PTPIPClient,
+        confirm: @Sendable ([PendingFile]) async -> Bool,
+        onUpdate: @Sendable (Update) -> Void
+    ) async throws -> [Photo] {
         var candidates: [(handle: UInt32, info: ObjectInfo, captured: Date?)] = []
         for storage in try await client.getStorageIDs() {
             for handle in try await client.getObjectHandles(storageID: storage) {
@@ -113,11 +146,12 @@ public struct CardImporter: Sendable {
         let pending = candidates.filter {
             !library.hasOriginal(named: $0.info.filename, size: $0.info.compressedSize, captured: $0.captured)
         }
-        onUpdate(.found(total: candidates.count, new: pending.map { ($0.info.filename, $0.captured) }))
-        guard !dryRun else { return [] }
+        let files = pending.map { PendingFile(name: $0.info.filename, captured: $0.captured, size: UInt64($0.info.compressedSize)) }
+        onUpdate(.found(total: candidates.count, new: files))
+        guard !files.isEmpty, await confirm(files) else { return [] }
 
         var saved: [Photo] = []
-        for (index, item) in pending.enumerated() {
+        for (index, item) in pending.enumerated() where !Task.isCancelled {
             let bytes = try await client.getObject(handle: item.handle)
             let photo = try library.addOriginal(bytes, named: item.info.filename, captured: item.captured)
             saved.append(photo)

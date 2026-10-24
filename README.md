@@ -6,39 +6,51 @@ right away.
 
 ## Status
 
-Step 2 (core flow) built, using the combined approach:
-
-- **Live previews:** with the camera in **Ctrl w/ Smartphone** mode and the Mac
-  on the camera's Wi-Fi, `sdprobe live` saves a 1616×1080 preview of every shot
-  ~1 s after you press the shutter.
-- **Full-size import:** later, with the camera in **Send to Computer** mode on
-  the home Wi-Fi, `sdprobe import` copies the new JPEG/ARW files and pairs
-  them with the previews by camera time.
-
-Both work on the real A7 III (2026-10-24): 5 live previews saved ~1–2 s after
-each shot, then 15 ARWs imported and all 5 previews matched to their originals.
+Step 3 (Dock app) in progress. The core flow (step 2) works on the real A7 III:
+5 live previews saved ~1–2 s after each shot, then 15 ARWs imported and all 5
+previews matched to their originals.
 
 ## Try it
 
 ```sh
-swift build
 swift test
-
-# While shooting: camera → Network → Ctrl w/ Smartphone, Mac joined to DIRECT-…
-.build/debug/sdprobe live                         # Ctrl-C to stop
-
-# Afterwards: Mac back on home Wi-Fi, camera → Network → Send to Computer
-.build/debug/sdprobe import --since 2026-11-23    # waits for the camera
-
-# Probing
-.build/debug/sdprobe discover --seconds 15
-.build/debug/sdprobe connect <camera-ip>
+scripts/build-app.sh && open build/Shutterdrop.app   # the Dock app
 ```
 
-Photos go to `~/Pictures/Shutterdrop/<date>/previews` and `/originals`, dated
-by the camera's clock. Send to Computer only works after the one-time USB
-pairing (see below). The first run asks for Local Network access for your
-terminal app; allow it.
+In the app: **Start Live** while shooting (camera on Ctrl w/ Smartphone, Mac on
+the camera's `DIRECT-…` Wi-Fi), then **Import Full-Size** afterwards (Mac back on
+home Wi-Fi, camera on Send to Computer). Photos go to
+`~/Pictures/Shutterdrop/<date>/previews` and `/originals`, dated by the
+camera's clock. Allow Local Network access when macOS asks.
+
+The same flow from the command line:
+
+```sh
+.build/debug/sdprobe live                         # Ctrl-C to stop
+.build/debug/sdprobe import --since 2026-10-24 --dry-run
+.build/debug/sdprobe import --since 2026-10-24
+.build/debug/sdprobe discover --seconds 15        # probing
+```
+
+## Pairing (one time, USB)
+
+Send to Computer refuses to start ("computer information not set") until a
+computer is registered on the camera over USB. Shutterdrop doesn't do this
+itself yet; until it does, use sony-pm-alt's `sony-guid-setter` with
+Shutterdrop's ID:
+
+1. `brew install libusb`, then compile
+   [`sony-guid-setter.c`](https://github.com/falk0069/sony-pm-alt) with its
+   `guid1`/`guid2` bytes replaced by the 16 bytes in
+   `~/Library/Application Support/Shutterdrop/client-guid` (created by the
+   first `sdprobe connect`/`import` or app import; `xxd -p` shows them).
+   `clang -I$(brew --prefix libusb)/include -L$(brew --prefix libusb)/lib -lusb-1.0 sony-guid-setter.c -o sony-guid-setter`
+2. Camera: MENU → Setup → USB Connection → **Mass Storage**; plug it in, eject
+   the disk in Finder, keep the cable connected.
+3. `sudo ./sony-guid-setter -g 054c:0c02` (the A7 III's USB ID). Success is
+   `Mass Storage Status: 00 (Success)`.
+
+Don't delete `client-guid`: a new ID means pairing again.
 
 ## How it will work
 

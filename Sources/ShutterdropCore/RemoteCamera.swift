@@ -22,6 +22,8 @@ public struct RemoteCameraEvent: Equatable, Sendable {
 /// Ctrl w/ Smartphone mode: JSON-RPC over HTTP on the camera's own Wi-Fi network.
 public struct RemoteCamera: Sendable {
     public static let defaultEndpoint = URL(string: "http://192.168.122.1:10000/sony")!
+    /// For calls that should answer at once, so an unreachable camera fails fast.
+    static let quickTimeout: TimeInterval = 5
     static let serviceType = "urn:schemas-sony-com:service:ScalarWebAPI:1"
 
     public let endpoint: URL
@@ -60,12 +62,13 @@ public struct RemoteCamera: Sendable {
 
     /// Current state, or with `longPoll` the next change.
     public func event(longPoll: Bool) async throws -> RemoteCameraEvent {
-        Self.parseEvent(try await call("camera", "getEvent", params: longPoll ? "[true]" : "[false]"))
+        let data = try await call("camera", "getEvent", params: longPoll ? "[true]" : "[false]", timeout: longPoll ? 40 : Self.quickTimeout)
+        return Self.parseEvent(data)
     }
 
     /// Fires the shutter and returns the postview URL(s).
     public func takePicture() async throws -> [URL] {
-        let result = try Self.result(in: try await call("camera", "actTakePicture"))
+        let result = try Self.result(in: try await call("camera", "actTakePicture", timeout: 30))
         return ((result.first as? [String]) ?? []).compactMap(URL.init(string:))
     }
 
@@ -78,8 +81,14 @@ public struct RemoteCamera: Sendable {
         return temporary
     }
 
-    func call(_ service: String, _ method: String, params: String = "[]", version: String = "1.0") async throws -> Data {
-        var request = URLRequest(url: endpoint.appending(path: service))
+    func call(
+        _ service: String,
+        _ method: String,
+        params: String = "[]",
+        version: String = "1.0",
+        timeout: TimeInterval = quickTimeout
+    ) async throws -> Data {
+        var request = URLRequest(url: endpoint.appending(path: service), timeoutInterval: timeout)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = Data(#"{"method":"\#(method)","params":\#(params),"id":1,"version":"\#(version)"}"#.utf8)

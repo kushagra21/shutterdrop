@@ -53,6 +53,23 @@ public struct PhotoLibrary: Sendable {
         return Photo(url: destination, captured: captured)
     }
 
+    /// Day folders, newest first.
+    public func days() -> [URL] {
+        let folders = (try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: [.isDirectoryKey])) ?? []
+        return folders
+            .filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true && !$0.lastPathComponent.hasPrefix(".") }
+            .sorted { $0.lastPathComponent > $1.lastPathComponent }
+    }
+
+    public func shots(inDay folder: URL) -> [Shot] {
+        ShotMatcher.shots(previews: previews(inDay: folder), originals: originals(inDay: folder))
+    }
+
+    /// The date a day folder stands for (nil for "undated").
+    public static func date(ofDay folder: URL) -> Date? {
+        CameraTimestamp.fromPTP(folder.lastPathComponent.replacingOccurrences(of: "-", with: "") + "T000000")
+    }
+
     public func previews(inDay folder: URL) -> [Photo] {
         files(in: folder.appending(path: "previews")).map { Photo(url: $0, captured: CameraTimestamp.fromPreviewName($0.lastPathComponent)) }
     }

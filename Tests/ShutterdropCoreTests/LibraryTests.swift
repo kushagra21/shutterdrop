@@ -72,3 +72,24 @@ private func photo(_ path: String, _ captured: Date?) -> Photo {
     #expect(library.previews(inDay: day).map(\.captured) == [preview.captured])
     #expect(library.originals(inDay: day).map(\.captured) == [captured])
 }
+
+@Test func groupsShotsNewestFirst() {
+    let previews = [
+        photo("pict261123_1338510000.JPG", date(23, 13, 38, 51)),
+        photo("pict261123_1400000000.JPG", date(23, 14, 0, 0)),
+    ]
+    let originals = [
+        photo("DSC00010.ARW", date(23, 13, 38, 52)),
+        photo("DSC00010.JPG", date(23, 13, 38, 52)),
+        photo("DSC00012.ARW", date(23, 13, 50, 0)),
+    ]
+    let shots = ShotMatcher.shots(previews: previews, originals: originals)
+    #expect(shots.map(\.displayURL.lastPathComponent) == [
+        "pict261123_1400000000.JPG",  // preview still waiting for its original
+        "DSC00012.ARW",               // original imported without a preview
+        "pict261123_1338510000.JPG",  // matched
+    ])
+    #expect(shots[0].originals.isEmpty)
+    #expect(shots[1].preview == nil)
+    #expect(shots[2].originals.map(\.url.lastPathComponent) == ["DSC00010.ARW", "DSC00010.JPG"])
+}
