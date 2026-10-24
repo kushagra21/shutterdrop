@@ -9,6 +9,7 @@ public enum PTPCode {
         public static let getObjectHandles: UInt16 = 0x1007
         public static let getObjectInfo: UInt16 = 0x1008
         public static let getObject: UInt16 = 0x1009
+        public static let getThumb: UInt16 = 0x100A
         public static let sonySDIOConnect: UInt16 = 0x9201
         public static let sonyGetSDIOExtDeviceInfo: UInt16 = 0x9202
         /// Send to Computer session control over PTP/IP (names unknown; see libgphoto2).

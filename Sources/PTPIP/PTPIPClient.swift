@@ -7,7 +7,6 @@ public enum PTPIPError: Error, CustomStringConvertible {
     case unexpectedPacket(Packet)
     case malformedPacket(length: UInt32)
     case packetTooLarge(length: UInt32)
-    case transactionInProgress
     case transactionMismatch(expected: UInt32, got: UInt32)
     case cancelled(transactionID: UInt32)
     case operationFailed(operation: UInt16, response: UInt16)
@@ -20,7 +19,6 @@ public enum PTPIPError: Error, CustomStringConvertible {
         case let .unexpectedPacket(packet): "unexpected packet: \(packet)"
         case let .malformedPacket(length): "malformed packet (length \(length))"
         case let .packetTooLarge(length): "packet too large (\(length) bytes)"
-        case .transactionInProgress: "another transaction is already running"
         case let .transactionMismatch(expected, got): "response for transaction \(got), expected \(expected)"
         case let .cancelled(id): "camera cancelled transaction \(id)"
         case let .operationFailed(operation, response):
@@ -57,6 +55,8 @@ public actor PTPIPClient {
     private var sessionOpen = false
     private var nextTransactionID: UInt32 = 1
     private var transactionInFlight = false
+    /// Callers waiting for the command channel; PTP runs one transaction at a time.
+    private var waiting: [CheckedContinuation<Void, Never>] = []
 
     public init(host: String, port: UInt16 = defaultPort, guid: [UInt8], name: String) {
         precondition(guid.count == 16, "PTP/IP GUIDs are 16 bytes")
@@ -118,9 +118,14 @@ public actor PTPIPClient {
     /// any data the camera sends back is collected.
     public func transaction(_ code: UInt16, _ parameters: [UInt32] = [], sending: [UInt8]? = nil) async throws -> TransactionResult {
         guard let command = commandChannel else { throw PTPIPError.notConnected }
-        guard !transactionInFlight else { throw PTPIPError.transactionInProgress }
+        while transactionInFlight {
+            await withCheckedContinuation { waiting.append($0) }
+        }
         transactionInFlight = true
-        defer { transactionInFlight = false }
+        defer {
+            transactionInFlight = false
+            if !waiting.isEmpty { waiting.removeFirst().resume() }
+        }
 
         // Operations outside a session (GetDeviceInfo, OpenSession) use transaction ID 0.
         let id: UInt32
@@ -189,6 +194,11 @@ public actor PTPIPClient {
 
     public func getObjectInfo(handle: UInt32) async throws -> ObjectInfo {
         try ObjectInfo(parsing: try await requireOK(PTPCode.Operation.getObjectInfo, [handle]).data)
+    }
+
+    /// The camera's small JPEG preview of an object (about 160×120).
+    public func getThumb(handle: UInt32) async throws -> [UInt8] {
+        try await requireOK(PTPCode.Operation.getThumb, [handle]).data
     }
 
     /// The whole file, in memory. A7 III ARW files are at most ~50 MB.

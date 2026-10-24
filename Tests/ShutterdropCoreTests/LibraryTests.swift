@@ -63,8 +63,7 @@ private func photo(_ path: String, _ captured: Date?) -> Photo {
     let captured = date(23, 13, 38, 52)
     let original = try library.addOriginal([9, 9, 9, 9], named: "DSC00010.JPG", captured: captured)
     #expect(original.url.path.hasSuffix("2026-11-23/originals/DSC00010.JPG"))
-    #expect(library.hasOriginal(named: "DSC00010.JPG", size: 4, captured: captured))
-    #expect(!library.hasOriginal(named: "DSC00010.JPG", size: 5, captured: captured))
+    #expect(library.originalKeys() == ["DSC00010.JPG|4"])
 
     let day = library.dayFolder(captured)
     // Compare names: the temp folder sits behind a /var → /private/var symlink.
@@ -173,4 +172,33 @@ private func photo(_ path: String, _ captured: Date?) -> Photo {
     try library.trash(Shot(preview: nil, originals: [gone]))
     #expect(!FileManager.default.fileExists(atPath: gone.url.path))
     #expect(FileManager.default.fileExists(atPath: keep.url.path))
+}
+
+@Test func shiftsWrongCameraClock() throws {
+    // Shots taken while the camera clock was 30 days fast, moved back to the real day.
+    let root = FileManager.default.temporaryDirectory.appending(path: "shutterdrop-shift-\(UUID())")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let library = PhotoLibrary(root: root) { try FileManager.default.removeItem(at: $0) }
+    let wrongDay = library.dayFolder(date(23, 13, 38, 51))
+
+    let temporary = root.appending(path: "download.tmp")
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    try Data([1]).write(to: temporary)
+    _ = try library.addPreview(from: temporary, named: "pict261123_1338510000.JPG")
+    _ = try library.addOriginal([2, 2], named: "DSC00010.ARW", captured: date(23, 13, 38, 50))
+
+    let offset = Calendar.current.date(from: DateComponents(year: 2026, month: 10, day: 24, hour: 13, minute: 29, second: 50))!
+        .timeIntervalSince(date(23, 13, 38, 50))
+    let shots = library.shots(inDay: wrongDay)
+    #expect(try library.shiftDates(of: shots, by: offset) == 2)
+
+    #expect(!FileManager.default.fileExists(atPath: wrongDay.path))  // emptied and removed
+    let rightDay = root.appending(path: "2026-10-24")
+    let fixed = library.shots(inDay: rightDay)
+    #expect(fixed.count == 1)
+    #expect(fixed[0].preview?.url.lastPathComponent == "pict261024_1329510000.JPG")
+    #expect(fixed[0].originals.map(\.url.lastPathComponent) == ["DSC00010.ARW"])
+    #expect(fixed[0].originals[0].captured == Calendar.current.date(from: DateComponents(year: 2026, month: 10, day: 24, hour: 13, minute: 29, second: 50)))
+    // A later import still recognises the file although the card says 23 Nov.
+    #expect(library.originalKeys().contains("DSC00010.ARW|2"))
 }

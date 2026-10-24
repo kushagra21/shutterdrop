@@ -86,12 +86,35 @@ public enum SSDP {
         }
     }
 
+    /// A socket made while the Mac is between networks stays tied to the old
+    /// one, so long searches start a fresh socket every `socketLifetime`.
+    static let socketLifetime: TimeInterval = 15
+
     private static func run(
         seconds: Double,
         searchTarget: String,
         isCancelled: () -> Bool,
         onMessage: (SSDPMessage) -> Bool
     ) throws -> Bool {
+        let deadline = Date().addingTimeInterval(seconds)
+        var listenedAtAll = false
+        while Date() < deadline, !isCancelled() {
+            let window = min(socketLifetime, deadline.timeIntervalSinceNow)
+            let (listening, done) = try runSocket(seconds: window, searchTarget: searchTarget, isCancelled: isCancelled, onMessage: onMessage)
+            listenedAtAll = listenedAtAll || listening
+            if done { break }
+        }
+        return listenedAtAll
+    }
+
+    /// One socket's worth of searching. Returns whether it listened on port
+    /// 1900 and whether `onMessage` asked to stop.
+    private static func runSocket(
+        seconds: Double,
+        searchTarget: String,
+        isCancelled: () -> Bool,
+        onMessage: (SSDPMessage) -> Bool
+    ) throws -> (listening: Bool, done: Bool) {
         let fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)
         guard fd >= 0 else { throw SSDPError.socket("socket", errno) }
         defer { close(fd) }
@@ -100,12 +123,11 @@ public enum SSDP {
         setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, socklen_t(MemoryLayout<Int32>.size))
         setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &yes, socklen_t(MemoryLayout<Int32>.size))
 
-        let listening = bindSocket(fd, port: port)
+        var listening = bindSocket(fd, port: port)
         if listening {
+            // Without a network the join fails; replies to our search still arrive.
             var membership = ip_mreq(imr_multiaddr: in_addr(s_addr: inet_addr(multicastGroup)), imr_interface: in_addr(s_addr: 0))
-            if setsockopt(fd, IPPROTO_IP, IP_ADD_MEMBERSHIP, &membership, socklen_t(MemoryLayout<ip_mreq>.size)) != 0 {
-                throw SSDPError.socket("IP_ADD_MEMBERSHIP", errno)
-            }
+            listening = setsockopt(fd, IPPROTO_IP, IP_ADD_MEMBERSHIP, &membership, socklen_t(MemoryLayout<ip_mreq>.size)) == 0
         } else if !bindSocket(fd, port: 0) {
             throw SSDPError.socket("bind", errno)
         }
@@ -130,12 +152,17 @@ public enum SSDP {
 
         let start = Date()
         var searchesSent = 0
+        var nextSearch: TimeInterval = 0
         var buffer = [UInt8](repeating: 0, count: 8192)
         while Date().timeIntervalSince(start) < seconds, !isCancelled() {
-            // Repeat the search at 0 s, 1 s and 2 s; UDP multicast is lossy.
-            if searchesSent < 3, Date().timeIntervalSince(start) >= Double(searchesSent) {
-                try send(search, from: fd)
+            // Search at 0, 1 and 2 s (UDP multicast is lossy), then every 5 s. A
+            // failed send (no network yet, e.g. while switching Wi-Fi) isn't
+            // fatal: keep listening and try again next time.
+            let elapsed = Date().timeIntervalSince(start)
+            if elapsed >= nextSearch {
+                try? send(search, from: fd)
                 searchesSent += 1
+                nextSearch = searchesSent < 3 ? Double(searchesSent) : elapsed + 5
             }
 
             var from = sockaddr_in()
@@ -146,16 +173,18 @@ public enum SSDP {
                 }
             }
             if count < 0 {
+                // Timeouts are normal; other errors (network going away) end this socket early.
                 if errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR { continue }
-                throw SSDPError.socket("recvfrom", errno)
+                Thread.sleep(forTimeInterval: 0.5)
+                return (listening, false)
             }
             let sender = String(cString: inet_ntoa(from.sin_addr))
             if let message = SSDPMessage.parse(String(decoding: buffer[0..<count], as: UTF8.self), sender: sender),
                onMessage(message) {
-                break
+                return (listening, true)
             }
         }
-        return listening
+        return (listening, false)
     }
 
     private static func bindSocket(_ fd: Int32, port: UInt16) -> Bool {

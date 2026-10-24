@@ -21,7 +21,8 @@ final class AppModel {
         /// `total` is 0 until the camera has said how many files it has.
         case reading(done: Int, total: Int)
         case confirm([PendingFile])
-        case copying(index: Int, count: Int, name: String)
+        /// `done` files copied of `count`; `current` is the one being copied now.
+        case copying(done: Int, count: Int, current: String?)
         case done(Int)
         case failed(String)
 
@@ -73,8 +74,6 @@ final class AppModel {
     }
 
     static let libraryKey = "libraryRoot"
-    static let importJPEGKey = "importJPEG"
-    static let importRAWKey = "importRAW"
     /// How long to wait for the camera to announce Send to Computer.
     static let importWait: Double = 180
 
@@ -100,7 +99,40 @@ final class AppModel {
 
     private var liveTask: Task<Void, Never>?
     private var importTask: Task<Void, Never>?
-    private var confirmation: CheckedContinuation<Bool, Never>?
+    private var confirmation: CheckedContinuation<[PendingFile], Never>?
+    /// Which files of each chosen photo to download.
+    enum FormatChoice: String, CaseIterable, Identifiable {
+        case both, raw, jpeg
+
+        var id: Self { self }
+        var title: String {
+            switch self {
+            case .both: "RAW + JPEG"
+            case .raw: "RAW only"
+            case .jpeg: "JPEG only"
+            }
+        }
+
+        func includes(_ fileName: String) -> Bool {
+            let kind = (fileName as NSString).pathExtension.uppercased()
+            return switch self {
+            case .both: true
+            case .raw: kind == "ARW"
+            case .jpeg: kind == "JPG" || kind == "JPEG"
+            }
+        }
+    }
+
+    static let importFormatKey = "importFormat"
+
+    var importFormat: FormatChoice = FormatChoice(rawValue: UserDefaults.standard.string(forKey: "importFormat") ?? "") ?? .both {
+        didSet { UserDefaults.standard.set(importFormat.rawValue, forKey: Self.importFormatKey) }
+    }
+
+    /// While choosing: ticked photos (by shot name, e.g. DSC04662) and camera thumbnails.
+    var importSelection: Set<String> = []
+    private(set) var importThumbnails: [PendingFile.ID: NSImage] = [:]
+    private var thumbnailLoader: ThumbnailLoader?
 
     init() {
         let saved = UserDefaults.standard.string(forKey: Self.libraryKey)
@@ -134,6 +166,36 @@ final class AppModel {
 
     func selectAllShots() {
         selection = Set(shots.map(\.id))
+    }
+
+    // MARK: - Adjusting dates
+
+    var dateAdjustment: DateAdjustment?
+
+    /// Opens Adjust Dates with `reference` (else the photo in the detail pane) as the photo to set.
+    func beginAdjustDates(reference: Shot? = nil) {
+        guard let day = selectedDay, let reference = reference ?? selectedShot, reference.captured != nil else { return }
+        dateAdjustment = DateAdjustment(reference: reference, selected: shotsToTrash, day: day, dayShots: shots)
+    }
+
+    /// Opens Adjust Dates for a whole day, set from its newest photo.
+    func beginAdjustDates(day: URL) {
+        let dayShots = library.shots(inDay: day)
+        guard let reference = dayShots.first(where: { $0.captured != nil }) else { return }
+        dateAdjustment = DateAdjustment(reference: reference, selected: [], day: day, dayShots: dayShots)
+    }
+
+    func applyDateShift(_ shots: [Shot], by offset: TimeInterval, reference: Shot) {
+        do {
+            try library.shiftDates(of: shots, by: offset)
+        } catch {
+            showError("Couldn't adjust every photo", error)
+        }
+        // Follow the photos to their corrected day.
+        let newDay = library.dayFolder(reference.captured.map { $0 + offset })
+        days = library.days()
+        selectedDay = days.contains(newDay) ? newDay : days.first
+        selection = []
     }
 
     // MARK: - Deleting
@@ -385,53 +447,100 @@ final class AppModel {
 
     // MARK: - Import
 
+    /// Bumped by every start and cancel, so a cancelled import still winding
+    /// down in the background can't touch the state of a newer one.
+    private var importGeneration = 0
+
     func startImport() {
-        guard importTask == nil else { return }
+        importGeneration += 1
+        let generation = importGeneration
         importState = .waiting
         importStartedAt = Date()
-        let defaults = UserDefaults.standard
-        var formats: Set<UInt16> = []
-        if defaults.object(forKey: Self.importJPEGKey) as? Bool ?? true { formats.insert(0x3801) }
-        if defaults.object(forKey: Self.importRAWKey) as? Bool ?? true { formats.insert(0xB101) }
-        let importer = CardImporter(library: library, formats: formats.isEmpty ? CardImporter.defaultFormats : formats, since: importRange.since())
+        // Both formats are listed; the chooser picks RAW, JPEG or both.
+        let importer = CardImporter(library: library, since: importRange.since())
 
         importTask = Task {
-            defer { importTask = nil }
             do {
                 guard let host = try await CardImporter.waitForCamera(seconds: Self.importWait) else {
-                    importState = .failed("The camera didn't show up. Is Send to Computer running, with the camera on the same Wi-Fi as this Mac?")
+                    setImportState(.failed("The camera didn't show up. Is Send to Computer running, with the camera on the same Wi-Fi as this Mac?"), generation: generation)
                     return
                 }
-                importState = .connecting(host: host, attempt: 1)
+                setImportState(.connecting(host: host, attempt: 1), generation: generation)
                 let saved = try await importer.run(
                     host: host,
                     guid: try ClientIdentity.guid(),
                     name: ClientIdentity.name,
-                    confirm: { files in await self.askToConfirm(files) }
-                ) { update in
-                    Task { @MainActor in self.apply(update) }
+                    choose: { files, loader in await self.askToChoose(files, loader: loader, generation: generation) }
+                ) { progress in
+                    Task { @MainActor in self.apply(progress, generation: generation) }
                 }
-                importState = .done(saved.count)
                 reloadDays()
+                guard !Task.isCancelled else { return }
+                setImportState(.done(saved.count), generation: generation)
                 notify("Import finished", "\(saved.count) full-size file(s) copied from the camera.")
-            } catch is CancellationError {
-                importState = .idle
             } catch {
-                importState = .failed(String(describing: error))
+                guard !Task.isCancelled else { return }
+                setImportState(.failed(String(describing: error)), generation: generation)
             }
         }
     }
 
-    /// Stops waiting, or stops after the file being copied.
-    func cancelImport() {
-        confirmation?.resume(returning: false)
-        confirmation = nil
-        importTask?.cancel()
+    /// Only the current import may change what the sheet shows.
+    private func setImportState(_ state: ImportState, generation: Int) {
+        if generation == importGeneration { importState = state }
     }
 
+    /// Closes the sheet at once. In the background the import stops waiting,
+    /// or stops after the file being copied, and signs off with the camera.
+    func cancelImport() {
+        importGeneration += 1
+        endChoosing(with: [])
+        importTask?.cancel()
+        importTask = nil
+        importState = .idle
+        showingImport = false
+    }
+
+    /// Copies the ticked files (`go`), or none.
     func confirmImport(_ go: Bool) {
-        confirmation?.resume(returning: go)
+        guard case let .confirm(files) = importState else { return }
+        let chosen = go ? chosenFiles(files) : []
+        // Show copying at once: the first file takes a while to arrive.
+        if !chosen.isEmpty {
+            importState = .copying(done: 0, count: chosen.count, current: chosen.first?.name)
+        }
+        endChoosing(with: chosen)
+    }
+
+    /// The files to download: of the ticked photos, the formats picked.
+    func chosenFiles(_ files: [PendingFile]) -> [PendingFile] {
+        files.filter { importSelection.contains(Self.shotName($0)) && importFormat.includes($0.name) }
+    }
+
+    /// How many files the chooser would download right now.
+    var importChosenCount: Int {
+        if case let .confirm(files) = importState { return chosenFiles(files).count }
+        return 0
+    }
+
+    /// DSC04662.ARW and DSC04662.JPG are one photo, "DSC04662".
+    static func shotName(_ file: PendingFile) -> String {
+        (file.name as NSString).deletingPathExtension
+    }
+
+    private func endChoosing(with chosen: [PendingFile]) {
+        confirmation?.resume(returning: chosen)
         confirmation = nil
+        thumbnailLoader = nil
+        importThumbnails = [:]
+    }
+
+    /// The camera's thumbnail for a file, fetched once while choosing.
+    func thumbnail(for file: PendingFile) async -> NSImage? {
+        if let cached = importThumbnails[file.id] { return cached }
+        guard let loader = thumbnailLoader, let data = await loader(file), let image = NSImage(data: data) else { return nil }
+        importThumbnails[file.id] = image
+        return image
     }
 
     func finishImportSheet() {
@@ -439,13 +548,17 @@ final class AppModel {
         showingImport = false
     }
 
-    private func askToConfirm(_ files: [PendingFile]) async -> Bool {
+    private func askToChoose(_ files: [PendingFile], loader: @escaping ThumbnailLoader, generation: Int) async -> [PendingFile] {
+        guard generation == importGeneration, !Task.isCancelled else { return [] }
+        // Everything in the chosen date range starts ticked.
+        importSelection = Set(files.map(Self.shotName))
+        thumbnailLoader = loader
         importState = .confirm(files)
         return await withCheckedContinuation { confirmation = $0 }
     }
 
-    private func apply(_ update: CardImporter.Update) {
-        guard importState.isActive else { return }
+    private func apply(_ update: CardImporter.Update, generation: Int) {
+        guard generation == importGeneration, importState.isActive else { return }
         switch update {
         case let .retrying(attempt):
             if case let .connecting(host, _) = importState { importState = .connecting(host: host, attempt: attempt) }
@@ -455,8 +568,10 @@ final class AppModel {
             importState = .reading(done: done, total: total)
         case .found:
             break  // the confirmation step shows the list
+        case let .copying(name, index, count):
+            importState = .copying(done: index - 1, count: count, current: name)
         case let .saved(photo, index, count):
-            importState = .copying(index: index, count: count, name: photo.url.lastPathComponent)
+            importState = .copying(done: index, count: count, current: nil)
             if library.dayFolder(photo.captured) == selectedDay { reloadShots() }
         }
     }

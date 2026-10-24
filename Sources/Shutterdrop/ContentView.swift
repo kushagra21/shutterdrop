@@ -48,6 +48,7 @@ struct ContentView: View {
             }
         }
         .sheet(isPresented: $model.showingImport) { ImportSheet() }
+        .sheet(item: $model.dateAdjustment) { AdjustDatesSheet(adjustment: $0) }
     }
 }
 
@@ -100,6 +101,7 @@ struct DayList: View {
             Label(Self.title(day), systemImage: "calendar")
                 .contextMenu {
                     Button("Show in Finder") { model.revealInFinder([day]) }
+                    Button("Adjust Dates…") { model.beginAdjustDates(day: day) }
                     Divider()
                     Button("Move Day to Trash…", role: .destructive) { model.trashDay(day) }
                 }
@@ -175,6 +177,7 @@ struct ShotGrid: View {
                         .contextMenu {
                             let targets = model.selection.contains(shot.id) ? model.selectedShots : [shot]
                             Button("Show in Finder") { model.revealInFinder(targets.map(\.displayURL)) }
+                            Button("Adjust Dates…") { model.beginAdjustDates(reference: shot) }
                             Divider()
                             Button(targets.count == 1 ? "Move to Trash…" : "Move \(targets.count) Photos to Trash…", role: .destructive) {
                                 model.trash(targets)

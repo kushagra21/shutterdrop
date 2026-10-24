@@ -42,6 +42,9 @@ struct ShutterdropApp: App {
                 Divider()
                 Button("Select All Photos") { model.selectAllShots() }
                     .keyboardShortcut("a", modifiers: [.command, .option])
+                Button("Adjust Dates…") { model.beginAdjustDates() }
+                    .keyboardShortcut("d", modifiers: [.command, .shift])
+                    .disabled(model.shots.isEmpty)
                 Button("Move to Trash") { model.trashSelected() }
                     .keyboardShortcut(.delete, modifiers: .command)
                     .disabled(model.shots.isEmpty)

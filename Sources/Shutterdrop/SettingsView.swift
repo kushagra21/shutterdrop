@@ -4,8 +4,6 @@ import SwiftUI
 
 struct SettingsView: View {
     @Environment(AppModel.self) private var model
-    @AppStorage(AppModel.importJPEGKey) private var importJPEG = true
-    @AppStorage(AppModel.importRAWKey) private var importRAW = true
 
     var body: some View {
         Form {
@@ -14,13 +12,6 @@ struct SettingsView: View {
             }
             Section("Camera pairing") {
                 PairingControls()
-            }
-            Section("Import from the camera") {
-                Toggle("JPEG files", isOn: $importJPEG)
-                Toggle("RAW (ARW) files", isOn: $importRAW)
-                if !importJPEG && !importRAW {
-                    Text("With neither selected, both are imported.").font(.callout).foregroundStyle(.secondary)
-                }
             }
         }
         .formStyle(.grouped)

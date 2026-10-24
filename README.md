@@ -23,8 +23,11 @@ home Wi-Fi, camera on Send to Computer). On first run the app asks for a
 location and creates a `Shutterdrop` folder there (default
 `~/Pictures/Shutterdrop`); the sidebar footer shows it and can change it,
 moving existing photos if you like. Inside, photos go to `<date>/previews` and
-`<date>/originals`, dated by the camera's clock. Deleting from the app moves
-files to the Trash.
+`<date>/originals`, dated by the camera's clock. Import lists the new photos
+with thumbnails so you can tick which to copy, and RAW, JPEG or both. Photos
+taken with a wrong camera clock can be moved to the right day with Edit →
+Adjust Dates (library only; the EXIF date is unchanged). Deleting from the app
+moves files to the Trash.
 Pair the camera from Camera → Pair Camera over USB. Allow Local Network access
 when macOS asks.
 

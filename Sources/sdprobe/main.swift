@@ -174,13 +174,14 @@ func params(_ values: [UInt32]) -> String {
     log("Importing from \(host) into \(library.root.path)")
     let importer = CardImporter(library: library, formats: allFormats ? [] : CardImporter.defaultFormats, since: since)
     let saved = try await importer.run(
-        host: host, port: port, guid: try ClientIdentity.guid(), name: ClientIdentity.name, confirm: { _ in !dryRun }
+        host: host, port: port, guid: try ClientIdentity.guid(), name: ClientIdentity.name, choose: { files, _ in dryRun ? [] : files }
     ) { update in
         let message: String? = switch update {
         case let .retrying(attempt): "Camera not accepting connections yet, attempt \(attempt)…"
         case let .connected(model): "Connected to \(model)"
         case let .reading(done, total): done == 0 || done == total || done % 100 == 0 ? "Reading card: \(done)/\(total)" : nil
         case let .found(total, new): describeFound(total: total, new: new, listing: dryRun)
+        case .copying: nil
         case let .saved(photo, index, count): "[\(index)/\(count)] \(photo.url.lastPathComponent)"
         }
         if let message { log(message) }

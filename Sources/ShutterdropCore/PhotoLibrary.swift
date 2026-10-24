@@ -54,11 +54,17 @@ public struct PhotoLibrary: Sendable {
         return Photo(url: destination, captured: captured)
     }
 
-    public func hasOriginal(named name: String, size: UInt32, captured: Date?) -> Bool {
-        let url = originalsFolder(for: captured).appending(path: name)
-        let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
-        return (attributes?[.size] as? NSNumber)?.uint64Value == UInt64(size)
+    /// "name|size" of every original in any day. Imports check against this
+    /// rather than the day the camera reports, because a day may have been
+    /// moved by `shiftDates` while the camera still has the old date.
+    public func originalKeys() -> Set<String> {
+        Set(days().flatMap { originals(inDay: $0) }.map { photo in
+            let size = (try? photo.url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? -1
+            return Self.originalKey(name: photo.url.lastPathComponent, size: UInt64(max(size, 0)))
+        })
     }
+
+    public static func originalKey(name: String, size: UInt64) -> String { "\(name)|\(size)" }
 
     public func addOriginal(_ bytes: [UInt8], named name: String, captured: Date?) throws -> Photo {
         let destination = try prepare(originalsFolder(for: captured), name)
@@ -134,6 +140,59 @@ public struct PhotoLibrary: Sendable {
 
     static func isDayFolderName(_ name: String) -> Bool {
         name == "undated" || name.wholeMatch(of: /\d{4}-\d{2}-\d{2}/) != nil
+    }
+
+    /// Corrects shots taken with a wrong camera clock: moves each to the day it
+    /// was really taken, renames previews to the corrected time (their names
+    /// carry the camera time) and sets originals' file dates. Matching keeps
+    /// working because previews and originals shift together. The EXIF date
+    /// inside the files is not changed. Returns how many files changed.
+    @discardableResult
+    public func shiftDates(of shots: [Shot], by offset: TimeInterval) throws -> Int {
+        let fileManager = FileManager.default
+        var changed = 0
+        var touchedDays = Set<URL>()
+        for shot in shots {
+            if let preview = shot.preview, let captured = preview.captured, let name = Self.previewName(preview.url.lastPathComponent, at: captured + offset) {
+                let folder = previewsFolder(for: captured + offset)
+                try fileManager.createDirectory(at: folder, withIntermediateDirectories: true)
+                try fileManager.moveItem(at: preview.url, to: folder.appending(path: name))
+                touchedDays.insert(preview.url.deletingLastPathComponent().deletingLastPathComponent())
+                changed += 1
+            }
+            for original in shot.originals {
+                guard let captured = original.captured else { continue }
+                let folder = originalsFolder(for: captured + offset)
+                let destination = folder.appending(path: original.url.lastPathComponent)
+                try fileManager.createDirectory(at: folder, withIntermediateDirectories: true)
+                if destination.standardizedFileURL != original.url.standardizedFileURL {
+                    try fileManager.moveItem(at: original.url, to: destination)
+                }
+                try fileManager.setAttributes([.modificationDate: captured + offset], ofItemAtPath: destination.path)
+                touchedDays.insert(original.url.deletingLastPathComponent().deletingLastPathComponent())
+                changed += 1
+            }
+        }
+        for day in touchedDays { removeIfEmpty(day) }
+        return changed
+    }
+
+    /// `pict261123_1338510000.JPG` renamed for a new time, keeping the trailing digits.
+    static func previewName(_ name: String, at date: Date) -> String? {
+        guard let match = name.firstMatch(of: /^pict\d{6}_\d{6}(.*)$/) else { return nil }
+        let c = Calendar.current.dateComponents([.year, .month, .day, .hour, .minute, .second], from: date)
+        return String(format: "pict%02d%02d%02d_%02d%02d%02d", c.year! % 100, c.month!, c.day!, c.hour!, c.minute!, c.second!) + match.1
+    }
+
+    /// Removes a day folder whose previews/originals folders are empty.
+    private func removeIfEmpty(_ day: URL) {
+        let fileManager = FileManager.default
+        for kind in ["previews", "originals"] {
+            let folder = day.appending(path: kind)
+            if files(in: folder).isEmpty { try? fileManager.removeItem(at: folder) }
+        }
+        let rest = (try? fileManager.contentsOfDirectory(atPath: day.path))?.filter { $0 != ".DS_Store" } ?? []
+        if rest.isEmpty { try? fileManager.removeItem(at: day) }
     }
 
     /// Moves a shot's files (preview and originals) to the Trash.
