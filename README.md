@@ -21,6 +21,9 @@ doesn't support it. Shutterdrop combines two Wi-Fi modes the camera does have:
 |---|---|
 | Camera on **Ctrl w/ Smartphone**. Each shot appears on the Mac **~1 s** after you press the shutter, as a 1616×1080 preview. | Camera on **Send to Computer**. Shutterdrop copies the full-size **ARW and/or JPEG** files over your home Wi-Fi and pairs each with its preview. |
 
+Need the full-size files *during* the shoot? **[Full-size USB tethering](#coming-next-full-size-usb-tethering)**
+is the next feature planned.
+
 ## Features
 
 - **Live previews** of every shot, taken with the camera's own shutter button.
@@ -84,11 +87,33 @@ command over USB that registers your Mac on the camera. It worked reliably in
 testing, but there's no warranty (see the [license](LICENSE)). Keep your
 photos backed up, and use a charged battery.
 
+## Coming next: full-size USB tethering
+
+*Planned; not built yet.*
+
+Wi-Fi previews are capped at 1616×1080. To get the **full-size files while you
+shoot**, Shutterdrop will add a third mode that uses a USB cable:
+
+- Set the camera to **MENU → Setup → USB Connection → PC Remote** and plug it
+  into the Mac.
+- Every shot's full-size **ARW and/or JPEG** lands in Shutterdrop within
+  seconds, straight into the same day folders, with no import step afterwards.
+- You choose **RAW + JPEG, RAW only or JPEG only**, as with imports.
+- Shoot with the camera's own shutter button, as with live previews.
+
+**How it's expected to work:** the A7 III's PC Remote mode speaks PTP over USB
+with Sony's extensions. A connection handshake (`SDIOConnect`) is followed by
+a "new object" event (`0xC201`) for each shot, after which the file can be
+downloaded. libgphoto2 documents this for Sony bodies. Shutterdrop's PTP code
+already knows these operations and events; what's missing is a USB connection
+(it speaks PTP over Wi-Fi today). Testing on the A7 III will confirm the
+details.
+
+Want to help, or have an A7 III to test with? Open an issue.
+
 ## Roadmap
 
-- **Full-size tethering over USB:** RAW/JPEG straight to the Mac during the
-  shoot, using the A7 III's PC Remote mode
-- App icon
+- **Full-size tethering over USB** (see [Coming next](#coming-next-full-size-usb-tethering))
 - Signed, notarized downloads, so you don't have to build it yourself
 - Writing corrected dates into the files (EXIF), not just the library
 - Open each new shot in Lightroom, Capture One or Preview automatically
