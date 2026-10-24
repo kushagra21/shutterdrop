@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/icon-256.png" width="128" height="128" alt="Shutterdrop icon"></p>
+
 # Shutterdrop
 
 **Wireless tethering for the Sony A7 III on macOS.** Shoot with the camera as

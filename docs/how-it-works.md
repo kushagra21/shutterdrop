@@ -167,6 +167,7 @@ Sources/
 Tests/              Swift Testing suites (no camera needed)
 scripts/
   build-app.sh            Build build/Shutterdrop.app (bundles sdprobe for pairing)
+  make-icon.swift         Draw the app icon from code → assets/AppIcon.icns
   probe-wifi-direct.sh    Offline probe for Ctrl w/ Smartphone mode
   probe-remote-api.sh     Offline Camera Remote API probe
 ```
