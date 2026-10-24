@@ -1,140 +1,112 @@
 # Shutterdrop
 
-Wireless tethering for the Sony A7 III (ILCE-7M3) on macOS. When the camera and
-the Mac are on the same Wi-Fi network, every photo you take shows up on the Mac
-right away.
+**Wireless tethering for the Sony A7 III on macOS.** Shoot with the camera as
+usual and every photo appears on your Mac about a second later. When you're
+done, bring the full-size RAW and JPEG files across over Wi-Fi, already paired
+with their previews.
 
-## Status
+No cables while shooting, no Sony software, and no Imaging Edge account.
 
-Step 3 (Dock app) in progress. The core flow (step 2) works on the real A7 III:
-5 live previews saved ~1–2 s after each shot, then 15 ARWs imported and all 5
-previews matched to their originals.
+> Shutterdrop currently supports the **Sony A7 III (ILCE-7M3)** only, tested
+> with firmware 4.04. Other Sony bodies may work but haven't been tried.
 
-## Try it
+## What it does
 
-```sh
-swift test
-scripts/build-app.sh && open build/Shutterdrop.app   # the Dock app
-```
+The A7 III has no Wi-Fi tethering to a computer, and Sony's Camera Remote SDK
+doesn't support it. Shutterdrop combines two Wi-Fi modes the camera does have:
 
-In the app: **Start Live** while shooting (camera on Ctrl w/ Smartphone, Mac on
-the camera's `DIRECT-…` Wi-Fi), then **Import Full-Size** afterwards (Mac back on
-home Wi-Fi, camera on Send to Computer). On first run the app asks for a
-location and creates a `Shutterdrop` folder there (default
-`~/Pictures/Shutterdrop`); the sidebar footer shows it and can change it,
-moving existing photos if you like. Inside, photos go to `<date>/previews` and
-`<date>/originals`, dated by the camera's clock. Import lists the new photos
-with thumbnails so you can tick which to copy, and RAW, JPEG or both. Photos
-taken with a wrong camera clock can be moved to the right day with Edit →
-Adjust Dates (library only; the EXIF date is unchanged). Deleting from the app
-moves files to the Trash.
-Pair the camera from Camera → Pair Camera over USB. Allow Local Network access
-when macOS asks.
+| While shooting | Afterwards |
+|---|---|
+| Camera on **Ctrl w/ Smartphone**. Each shot appears on the Mac **~1 s** after you press the shutter, as a 1616×1080 preview. | Camera on **Send to Computer**. Shutterdrop copies the full-size **ARW and/or JPEG** files over your home Wi-Fi and pairs each with its preview. |
 
-The same flow from the command line:
+## Features
 
-```sh
-.build/debug/sdprobe live                         # Ctrl-C to stop
-.build/debug/sdprobe import --since 2026-10-24 --dry-run
-.build/debug/sdprobe import --since 2026-10-24
-.build/debug/sdprobe discover --seconds 15        # probing
-```
-
-## Pairing (one time, USB)
-
-Send to Computer refuses to start ("computer information not set") until a
-computer is registered on the camera over USB.
-
-1. Camera: MENU → Setup → USB Connection → **Mass Storage**; plug it in and
-   eject its disks in Finder, keeping the cable connected.
-2. In the app: **Camera → Pair Camera over USB…** (asks for an administrator
-   password), or from Terminal: `sudo .build/debug/sdprobe pair`.
-3. Unplug and set USB Connection back.
-
-Pairing registers the ID in `~/Library/Application Support/Shutterdrop/client-guid`;
-don't delete that file, or the camera has to be paired again. The protocol (a
-vendor SCSI command 0x7A plus an 8 KB block with the name and ID) was
-reverse-engineered by Clemens Fruhwirth for sony-pm-alt's `sony-guid-setter`;
-Shutterdrop reimplements it with IOUSBHost. It needs root, and when launched
-through AppleScript's administrator prompt it must run via
-`launchctl asuser <uid>`, or opening the USB interface fails.
-
-## How it will work
-
-- **Protocol:** PTP/IP (Picture Transfer Protocol over TCP/IP, port 15740). The
-  A7 III speaks it when connected to a computer over Wi-Fi.
-- **Discovery:** the camera announces itself on the local network via
-  SSDP/UPnP. The Mac finds it, connects over PTP/IP, and listens for
-  "new object" events from the camera.
-- **Transfer:** on each new-photo event, download the file (JPEG and/or ARW)
-  into a watch folder, and optionally open it in Preview, Lightroom, etc.
-
-## Constraints found so far
-
-- Sony's official Camera Remote SDK does **not** list the ILCE-7M3, so we
-  implement PTP/IP ourselves (or via libgphoto2).
-- Sony sends some non-standard PTP packets, so a plain PTP/IP client may need
-  Sony-specific handling. Reference: https://github.com/falk0069/sony-pm-alt
-- **Pairing:** "Send to Computer" refuses to start until a computer is
-  registered over USB. sony-pm-alt's `sony-guid-setter` (camera in USB Mass
-  Storage mode, run with sudo) registered Shutterdrop's GUID on macOS 26.
-  The app will need its own Swift version of this step.
-- **Send to Computer is batch-only (tested 2026-10-24):** after pairing, the
-  camera announces itself over SSDP (`FedoraCore/2 UPnP/1.0 MINT-X`,
-  `MtpNullService`), accepts PTP/IP on 15740 and exposes its card, but only
-  advertises StoreAdded/StoreRemoved/DevicePropChanged events. Taking a photo
-  produced no event. It suits "import new photos", not instant transfer.
-- **No PC Remote over Wi-Fi** on the A7 III. The Network menu only has the
-  smartphone functions and Send to Computer.
-- **Ctrl w/ Smartphone = instant previews (tested 2026-10-24):** the camera
-  becomes a Wi-Fi Direct access point (camera at 192.168.122.1) and runs Sony's
-  Camera Remote API (ScalarWebAPI, "Smart Remote Control" 2.1.7, JSON-RPC at
-  `http://192.168.122.1:10000/sony`, description at `:64321/dd.xml`). Long-polling
-  `camera.getEvent [true]` reports a `takePictureUrl` **~1 s after each press of
-  the camera's own shutter button**. `actTakePicture` also works. The image at
-  that URL is a **1616×1080 JPEG** (~360 KB), not the full file;
-  `setPostviewImageSize` is not offered. The PTP/IP port is closed in this mode.
-  Downside: the Mac has to join the camera's Wi-Fi, so it loses the home network
-  unless it has a second connection (Ethernet).
-
-## Plan
-
-1. **Spike:** a command-line Swift tool that discovers the camera, completes the
-   PTP/IP handshake, and logs events while you take photos.
-2. **Transfer (combined approach):** live previews over Wi-Fi Direct while
-   shooting, full-size import over Send to Computer afterwards, paired by
-   camera time. The core flow lives in a library (`ShutterdropCore`), not the
-   CLI, so the app can reuse it unchanged. Full-size tethering over USB may
-   come later as a third mode.
-3. **App:** a regular SwiftUI Dock app on top of the core, so the tool is
-   usable without the terminal:
-   - Main window with a live grid of incoming shots and a large preview of
-     the latest one, plus a toolbar showing connection state
-     (searching / connected / receiving) with connect/disconnect.
-   - Dock icon badge with the number of new shots in the session.
-   - Settings: save folder, JPEG/ARW/both, file naming, open each shot in
-     another app (Preview, Lightroom, Capture One), launch at login.
-   - Auto-reconnect when the camera drops off Wi-Fi, and notifications.
-   - First-run guide for setting up the camera's Wi-Fi mode and allowing
-     Local Network access.
-
-## Open camera checks
-
-- Firmware 4.04 confirmed (EXIF `ILCE-7M3 v4.04`; PTP reports "4.0").
-- The camera's clock was ~30 days fast until 2026-10-24; shots from before the
-  fix are dated up to 2026-11-23 and land in that library folder.
-- **Send to Computer needs Sony's 0x9280/0x9281 handshake** (as libgphoto2 does
-  it): with it the camera shows "Sending… Shutterdrop", stays connected
-  (11 min tested) and shuts down when done; without it the camera drops the
-  connection after ~2 minutes.
-- **Import is slow over Wi-Fi:** listing the card takes ~17–20 s, and speed
-  fell from ~1.2 MB/s to ~0.2 MB/s over an 11-minute import (25 MB ARWs). The
-  app needs progress and resume (re-running already skips copied files).
-- The camera announces itself over SSDP a second or so before port 15740
-  accepts connections; the importer retries for 20 s.
+- **Live previews** of every shot, taken with the camera's own shutter button.
+- **Full-size import** over Wi-Fi:
+  - Pick the photos to copy from a list with thumbnails.
+  - Choose **RAW + JPEG**, **RAW only** or **JPEG only**.
+  - See progress throughout; a cancelled or interrupted import carries on where it stopped.
+- **Automatic matching** of each preview with its full-size files.
+- **One-click camera pairing** over USB, needed once for Send to Computer.
+- **Library you control:** choose where photos go. Shutterdrop keeps a `Shutterdrop` folder there, one folder per day.
+- **Browse** by day with a large preview. Open files or show them in Finder.
+- **Delete** photos, a selection or a whole day (to the Trash).
+- **Fix wrong camera clocks:** shift a photo, a selection or a day to the right date.
+- A **command-line tool** (`sdprobe`) for the same flow, plus camera probing.
 
 ## Requirements
 
-- macOS 26+
-- Xcode 27.1+ (macOS 27 SDK)
-- Sony A7 III with recent firmware
+- A Mac with **macOS 26** or later
+- **Xcode 26** or later (Swift 6.2), to build it. Tested with Xcode 27.1.
+- A **Sony A7 III** and a USB cable (used once, for pairing)
+- A home **2.4 GHz Wi-Fi** network. The A7 III doesn't use 5 GHz.
+
+## Quick start
+
+```sh
+git clone https://github.com/<you>/shutterdrop.git
+cd shutterdrop
+scripts/build-app.sh
+open build/Shutterdrop.app
+```
+
+On first launch the app asks where to save photos, then shows a short setup
+guide. Allow **Local Network** access when macOS asks.
+
+Then:
+
+1. **Pair once:** camera on USB in Mass Storage mode → **Camera → Pair Camera over USB…**
+2. **Shoot:** camera on **Ctrl w/ Smartphone**, Mac on the camera's `DIRECT-…` Wi-Fi → **Start Live**
+3. **Import:** Mac back on home Wi-Fi → **Import Full-Size**, camera on **Send to Computer**
+
+📖 **[The user guide](docs/user-guide.md)** walks through every step with the
+exact camera menus, plus troubleshooting.
+
+## Good to know
+
+- **Previews are 1616×1080.** That's what the camera sends over Wi-Fi while
+  shooting. Full-size files come with the import.
+- **While shooting, the Mac is on the camera's Wi-Fi**, so it has no internet
+  unless it's also on Ethernet.
+- **Import is slow-ish:** about 1 MB/s, roughly 20–30 s per 25 MB ARW. Choose
+  the photos you need.
+- **Set the camera's clock right.** Matching and day folders use the camera's
+  time. Adjust Dates fixes photos taken with a wrong clock in Shutterdrop's
+  library, but not inside the files (EXIF).
+
+## Roadmap
+
+- **Full-size tethering over USB:** RAW/JPEG straight to the Mac during the
+  shoot, using the A7 III's PC Remote mode
+- App icon
+- Signed, notarized downloads, so you don't have to build it yourself
+- Writing corrected dates into the files (EXIF), not just the library
+- Open each new shot in Lightroom, Capture One or Preview automatically
+- Launch at login, and auto-import whenever the camera starts Send to Computer
+- Support for more Sony bodies (A7R III, A9, …) once tested
+
+## How it works
+
+Shutterdrop speaks the camera's own protocols directly:
+- **Sony's Camera Remote API** for live previews
+- **PTP/IP**, with Sony's extensions, for imports
+- **A vendor USB command** for pairing
+
+[docs/how-it-works.md](docs/how-it-works.md) covers the protocol details, what
+was found testing the A7 III, the project layout and the developer tools.
+
+## Acknowledgements
+
+- [sony-pm-alt](https://github.com/falk0069/sony-pm-alt) by falk0069, and
+  Clemens Fruhwirth's reverse-engineering of Sony's USB pairing command
+- [libgphoto2](https://github.com/gphoto/libgphoto2), for documenting Sony's
+  PTP/IP transfer handshake
+
+Shutterdrop reimplements these protocols in Swift and contains no code from
+either project.
+
+## License
+
+[MIT](LICENSE). Sony, Alpha and related names are trademarks of Sony Group
+Corporation. Shutterdrop is an independent project, not affiliated with or
+endorsed by Sony.
