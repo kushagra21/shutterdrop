@@ -1,10 +1,11 @@
 import Foundation
 import os
 import PTPIP
+import ShutterdropCore
 import SSDP
 
-// sdprobe: step 1 of Shutterdrop. Finds the camera on the LAN, completes the
-// PTP/IP handshake and logs every event while you take photos.
+// sdprobe: Shutterdrop's command-line tool. Probes the camera (discover,
+// connect), saves live previews (live) and imports full-size files (import).
 
 let usage = """
     usage:
@@ -17,18 +18,25 @@ let usage = """
           --name NAME   Name the camera sees for this Mac (default "Shutterdrop")
           --sony-sdio   After opening the session, run Sony's SDIO connect sequence
                         (used by PC Remote over USB; may or may not apply over Wi-Fi)
+      sdprobe live [--endpoint URL] [--out DIR]
+          Camera in Ctrl w/ Smartphone mode, Mac joined to its DIRECT-… Wi-Fi:
+          save a preview of every shot as it's taken, until Ctrl-C.
+      sdprobe import [<camera-ip>] [--wait N] [--since YYYY-MM-DD[THH:MM]] [--dry-run] [--out DIR] [--all-formats]
+          Camera in Send to Computer mode on the home Wi-Fi: copy new JPEG/ARW
+          files, then pair them with the live previews. Without an IP, waits up
+          to N seconds (default 120) for the camera to announce itself.
+          --since only copies files the camera dated at or after that day/time;
+          --dry-run lists what would be copied without copying.
+      --out DIR defaults to ~/Pictures/Shutterdrop.
     """
 
 setvbuf(stdout, nil, _IOLBF, 0)
 
-let timeFormatter: DateFormatter = {
+/// Callable from any thread (camera callbacks arrive off the main actor).
+func log(_ message: String) {
     let formatter = DateFormatter()
     formatter.dateFormat = "HH:mm:ss.SSS"
-    return formatter
-}()
-
-@MainActor func log(_ message: String) {
-    print("\(timeFormatter.string(from: Date())) \(message)")
+    print("\(formatter.string(from: Date())) \(message)")
 }
 
 func fail(_ message: String) -> Never {
@@ -80,6 +88,7 @@ func loadOrCreateGUID() throws -> [UInt8] {
                 mark: [previous?.mark ?? " ", mark].max { markStrength.firstIndex(of: $0)! < markStrength.firstIndex(of: $1)! }!
             )
         }
+        return false
     }
     if !listened {
         log("Note: port 1900 is in use by another app, so only replies to our search were seen, not announcements.")
@@ -145,6 +154,82 @@ func loadOrCreateGUID() throws -> [UInt8] {
     log("Camera closed the event channel")
 }
 
+// MARK: - live
+
+@MainActor func runLive(endpoint: URL?, library: PhotoLibrary) async throws {
+    log("Looking for the camera's Remote API…")
+    let camera = if let endpoint { RemoteCamera(endpoint: endpoint) } else { await RemoteCamera.discover() }
+    log("Using \(camera.endpoint.absoluteString). Saving previews under \(library.root.path)")
+    try await LiveSession(camera: camera, library: library).run { update in
+        let message = switch update {
+        case let .connected(apis): "Connected (\(apis.count) API calls available). Take photos with the camera. Ctrl-C to stop."
+        case let .status(status): "Camera: \(status)"
+        case let .saved(photo): "Saved \(photo.url.path)"
+        case let .problem(problem): "Problem: \(problem)"
+        }
+        log(message)
+    }
+}
+
+// MARK: - import
+
+/// Waits for a camera in Send to Computer mode to announce itself (MtpNullService over SSDP).
+@MainActor func waitForSendToComputer(seconds: Double) async throws -> String? {
+    log("Waiting up to \(Int(seconds)) s. Choose Network → Send to Computer on the camera.")
+    let found = OSAllocatedUnfairLock<String?>(initialState: nil)
+    try await SSDP.discover(seconds: seconds, searchTarget: "urn:microsoft-com:service:MtpNullService:1") { message in
+        guard message.looksLikeSonyCamera, message.headers.values.contains(where: { $0.contains("MtpNullService") }) else { return false }
+        found.withLock { $0 = message.sender }
+        return true
+    }
+    return found.withLock { $0 }
+}
+
+@MainActor func runImport(host: String?, port: UInt16, wait: Double, library: PhotoLibrary, allFormats: Bool, since: Date?, dryRun: Bool) async throws {
+    var host = host
+    if host == nil { host = try await waitForSendToComputer(seconds: wait) }
+    guard let host else {
+        fail("no camera announced itself; is Send to Computer running and the camera on this Wi-Fi?")
+    }
+    log("Importing from \(host) into \(library.root.path)")
+    let importer = CardImporter(library: library, formats: allFormats ? [] : CardImporter.defaultFormats, since: since, dryRun: dryRun)
+    let saved = try await importer.run(host: host, port: port, guid: try loadOrCreateGUID(), name: "Shutterdrop") { update in
+        let message = switch update {
+        case let .connected(model): "Connected to \(model)"
+        case let .found(total, new): describeFound(total: total, new: new, listing: dryRun)
+        case let .saved(photo, index, count): "[\(index)/\(count)] \(photo.url.lastPathComponent)"
+        }
+        log(message)
+    }
+    guard !dryRun else { return log("Dry run: nothing copied") }
+    log("Imported \(saved.count) file(s)")
+
+    for day in Set(saved.map { library.dayFolder($0.captured) }).sorted(by: { $0.path < $1.path }) {
+        let matches = ShotMatcher.match(previews: library.previews(inDay: day), originals: library.originals(inDay: day))
+        guard !matches.isEmpty else { continue }
+        log("\(day.lastPathComponent): \(matches.filter { !$0.originals.isEmpty }.count) of \(matches.count) previews matched")
+        for match in matches {
+            let names = match.originals.map(\.url.lastPathComponent).joined(separator: " + ")
+            print("  \(match.preview.url.lastPathComponent) → \(names.isEmpty ? "(no original)" : names)")
+        }
+    }
+}
+
+func describeFound(total: Int, new: [(name: String, captured: Date?)], listing: Bool) -> String {
+    let dates = new.compactMap(\.captured)
+    var text = "\(total) matching file(s) on the camera, \(new.count) new"
+    if let first = dates.min(), let last = dates.max() {
+        text += ", camera dates \(first.formatted(date: .numeric, time: .shortened)) – \(last.formatted(date: .numeric, time: .shortened))"
+    }
+    if listing {
+        for file in new.prefix(50) {
+            text += "\n  \(file.name)  \(file.captured?.formatted(date: .numeric, time: .standard) ?? "undated")"
+        }
+        if new.count > 50 { text += "\n  … and \(new.count - 50) more" }
+    }
+    return text
+}
+
 // MARK: - arguments
 
 var arguments = Array(CommandLine.arguments.dropFirst())
@@ -161,6 +246,16 @@ var arguments = Array(CommandLine.arguments.dropFirst())
     guard let text = option(name) else { return nil }
     guard let value = T(text) else { fail("\(name): invalid value \"\(text)\"") }
     return value
+}
+
+/// `2026-10-24`, `2026-10-24T13:30` or `2026-10-24T13:30:15`, local time.
+func parseSince(_ text: String) -> Date? {
+    let parts = text.split(separator: "T", maxSplits: 1)
+    let day = parts[0].replacingOccurrences(of: "-", with: "")
+    var time = parts.count > 1 ? parts[1].replacingOccurrences(of: ":", with: "") : "0000"
+    if time.count == 4 { time += "00" }
+    guard day.count == 8, time.count == 6 else { return nil }
+    return CameraTimestamp.fromPTP("\(day)T\(time)")
 }
 
 @MainActor func flag(_ name: String) -> Bool {
@@ -183,6 +278,26 @@ do {
         let sonySDIO = flag("--sony-sdio")
         guard arguments.count == 1, let host = arguments.first else { fail("connect needs one camera IP address\n\n\(usage)") }
         try await runConnect(host: host, port: port, name: name, sonySDIO: sonySDIO)
+    case "live":
+        arguments.removeFirst()
+        let endpointText = option("--endpoint")
+        let endpoint = endpointText.flatMap(URL.init(string:))
+        if endpointText != nil, endpoint == nil { fail("--endpoint must be a URL") }
+        let library = PhotoLibrary(root: option("--out").map { URL(filePath: $0) } ?? PhotoLibrary.defaultRoot)
+        guard arguments.isEmpty else { fail("unexpected arguments: \(arguments.joined(separator: " "))\n\n\(usage)") }
+        try await runLive(endpoint: endpoint, library: library)
+    case "import":
+        arguments.removeFirst()
+        let wait = numberOption("--wait", as: Double.self) ?? 120
+        let port = numberOption("--port", as: UInt16.self) ?? PTPIPClient.defaultPort
+        let library = PhotoLibrary(root: option("--out").map { URL(filePath: $0) } ?? PhotoLibrary.defaultRoot)
+        let allFormats = flag("--all-formats")
+        let sinceText = option("--since")
+        let since = sinceText.flatMap(parseSince)
+        if sinceText != nil, since == nil { fail("--since must look like 2026-10-24, 2026-10-24T13:30 or 2026-10-24T13:30:15") }
+        let dryRun = flag("--dry-run")
+        guard arguments.count <= 1 else { fail("import takes at most one camera IP address\n\n\(usage)") }
+        try await runImport(host: arguments.first, port: port, wait: wait, library: library, allFormats: allFormats, since: since, dryRun: dryRun)
     case "-h", "--help", "help":
         print(usage)
     default:

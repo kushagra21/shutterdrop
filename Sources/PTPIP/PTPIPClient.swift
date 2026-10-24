@@ -114,8 +114,9 @@ public actor PTPIPClient {
         sessionOpen = false
     }
 
-    /// Runs one operation with no host-to-camera data and collects any data the camera sends back.
-    public func transaction(_ code: UInt16, _ parameters: [UInt32] = []) async throws -> TransactionResult {
+    /// Runs one operation. `sending` is a host-to-camera data phase; otherwise
+    /// any data the camera sends back is collected.
+    public func transaction(_ code: UInt16, _ parameters: [UInt32] = [], sending: [UInt8]? = nil) async throws -> TransactionResult {
         guard let command = commandChannel else { throw PTPIPError.notConnected }
         guard !transactionInFlight else { throw PTPIPError.transactionInProgress }
         transactionInFlight = true
@@ -130,7 +131,12 @@ public actor PTPIPClient {
             id = 0
         }
 
-        try await command.write(.operationRequest(OperationRequest(code: code, transactionID: id, parameters: parameters)))
+        let dataPhase = sending == nil ? OperationRequest.noDataOrDataIn : OperationRequest.dataOut
+        try await command.write(.operationRequest(OperationRequest(dataPhase: dataPhase, code: code, transactionID: id, parameters: parameters)))
+        if let sending {
+            try await command.write(.startData(transactionID: id, totalLength: UInt64(sending.count)))
+            try await command.write(.endData(transactionID: id, payload: sending))
+        }
         var data: [UInt8] = []
         while true {
             let packet = try await command.readPacket()
@@ -164,8 +170,30 @@ public actor PTPIPClient {
         nextTransactionID = 1
     }
 
+    public func closeSession() async throws {
+        _ = try await requireOK(PTPCode.Operation.closeSession)
+        sessionOpen = false
+    }
+
+    public func getStorageIDs() async throws -> [UInt32] {
+        var reader = ByteReader(try await requireOK(PTPCode.Operation.getStorageIDs).data)
+        return try reader.readArray(UInt32.self)
+    }
+
+    /// Handles of every object in a storage. `format` 0 = all formats; `parent` 0 = the whole tree.
+    public func getObjectHandles(storageID: UInt32, format: UInt16 = 0, parent: UInt32 = 0) async throws -> [UInt32] {
+        let result = try await requireOK(PTPCode.Operation.getObjectHandles, [storageID, UInt32(format), parent])
+        var reader = ByteReader(result.data)
+        return try reader.readArray(UInt32.self)
+    }
+
     public func getObjectInfo(handle: UInt32) async throws -> ObjectInfo {
         try ObjectInfo(parsing: try await requireOK(PTPCode.Operation.getObjectInfo, [handle]).data)
+    }
+
+    /// The whole file, in memory. A7 III ARW files are at most ~50 MB.
+    public func getObject(handle: UInt32) async throws -> [UInt8] {
+        try await requireOK(PTPCode.Operation.getObject, [handle]).data
     }
 
     /// Camera events as they arrive. Keep-alive probes are answered here and not yielded.

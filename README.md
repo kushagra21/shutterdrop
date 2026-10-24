@@ -6,9 +6,17 @@ right away.
 
 ## Status
 
-Step 1 (spike) built: `sdprobe` discovers devices over SSDP and speaks PTP/IP
-(handshake, device info, session, events). It's tested against a fake camera,
-but not yet against the real A7 III.
+Step 2 (core flow) built, using the combined approach:
+
+- **Live previews:** with the camera in **Ctrl w/ Smartphone** mode and the Mac
+  on the camera's Wi-Fi, `sdprobe live` saves a 1616×1080 preview of every shot
+  ~1 s after you press the shutter.
+- **Full-size import:** later, with the camera in **Send to Computer** mode on
+  the home Wi-Fi, `sdprobe import` copies the new JPEG/ARW files and pairs
+  them with the previews by camera time.
+
+Both work on the real A7 III (2026-10-24): 5 live previews saved ~1–2 s after
+each shot, then 15 ARWs imported and all 5 previews matched to their originals.
 
 ## Try it
 
@@ -16,17 +24,21 @@ but not yet against the real A7 III.
 swift build
 swift test
 
-# 1. Turn on the camera's Wi-Fi function, then look for it on the network.
-.build/debug/sdprobe discover --seconds 15
+# While shooting: camera → Network → Ctrl w/ Smartphone, Mac joined to DIRECT-…
+.build/debug/sdprobe live                         # Ctrl-C to stop
 
-# 2. Connect to the address marked ★ (or the camera's IP from its Wi-Fi info screen)
-#    and take photos; every event is logged. Ctrl-C to stop.
-.build/debug/sdprobe connect 192.168.0.x
-.build/debug/sdprobe connect 192.168.0.x --sony-sdio   # if no events arrive
+# Afterwards: Mac back on home Wi-Fi, camera → Network → Send to Computer
+.build/debug/sdprobe import --since 2026-11-23    # waits for the camera
+
+# Probing
+.build/debug/sdprobe discover --seconds 15
+.build/debug/sdprobe connect <camera-ip>
 ```
 
-The first run asks for Local Network access for your terminal app. Allow it,
-or nothing on the LAN is reachable.
+Photos go to `~/Pictures/Shutterdrop/<date>/previews` and `/originals`, dated
+by the camera's clock. Send to Computer only works after the one-time USB
+pairing (see below). The first run asks for Local Network access for your
+terminal app; allow it.
 
 ## How it will work
 
@@ -44,16 +56,37 @@ or nothing on the LAN is reachable.
   implement PTP/IP ourselves (or via libgphoto2).
 - Sony sends some non-standard PTP packets, so a plain PTP/IP client may need
   Sony-specific handling. Reference: https://github.com/falk0069/sony-pm-alt
-- Which camera Wi-Fi mode allows *instant* per-shot transfer ("PC Remote" vs.
-  "Send to Computer") still needs to be confirmed against a real camera.
+- **Pairing:** "Send to Computer" refuses to start until a computer is
+  registered over USB. sony-pm-alt's `sony-guid-setter` (camera in USB Mass
+  Storage mode, run with sudo) registered Shutterdrop's GUID on macOS 26.
+  The app will need its own Swift version of this step.
+- **Send to Computer is batch-only (tested 2026-10-24):** after pairing, the
+  camera announces itself over SSDP (`FedoraCore/2 UPnP/1.0 MINT-X`,
+  `MtpNullService`), accepts PTP/IP on 15740 and exposes its card, but only
+  advertises StoreAdded/StoreRemoved/DevicePropChanged events. Taking a photo
+  produced no event. It suits "import new photos", not instant transfer.
+- **No PC Remote over Wi-Fi** on the A7 III. The Network menu only has the
+  smartphone functions and Send to Computer.
+- **Ctrl w/ Smartphone = instant previews (tested 2026-10-24):** the camera
+  becomes a Wi-Fi Direct access point (camera at 192.168.122.1) and runs Sony's
+  Camera Remote API (ScalarWebAPI, "Smart Remote Control" 2.1.7, JSON-RPC at
+  `http://192.168.122.1:10000/sony`, description at `:64321/dd.xml`). Long-polling
+  `camera.getEvent [true]` reports a `takePictureUrl` **~1 s after each press of
+  the camera's own shutter button**. `actTakePicture` also works. The image at
+  that URL is a **1616×1080 JPEG** (~360 KB), not the full file;
+  `setPostviewImageSize` is not offered. The PTP/IP port is closed in this mode.
+  Downside: the Mac has to join the camera's Wi-Fi, so it loses the home network
+  unless it has a second connection (Ethernet).
 
 ## Plan
 
 1. **Spike:** a command-line Swift tool that discovers the camera, completes the
    PTP/IP handshake, and logs events while you take photos.
-2. **Transfer:** download each new photo to a folder as soon as it's taken.
-   The core flow (discover → connect → event → download) lives in a library
-   (`ShutterdropCore`), not the CLI, so the app can reuse it unchanged.
+2. **Transfer (combined approach):** live previews over Wi-Fi Direct while
+   shooting, full-size import over Send to Computer afterwards, paired by
+   camera time. The core flow lives in a library (`ShutterdropCore`), not the
+   CLI, so the app can reuse it unchanged. Full-size tethering over USB may
+   come later as a third mode.
 3. **App:** a regular SwiftUI Dock app on top of the core, so the tool is
    usable without the terminal:
    - Main window with a live grid of incoming shots and a large preview of
@@ -68,10 +101,18 @@ or nothing on the LAN is reachable.
 
 ## Open camera checks
 
-- Confirm the firmware shows **4.04** (Menu → Setup → Version).
-- In the camera's **Network** menu, record whether **PC Remote Function**
-  exists and its connection options (USB / Wi-Fi Direct / Wi-Fi Access Point),
-  plus the other items (Send to Computer, Wi-Fi Settings, etc.).
+- Firmware 4.04 confirmed (EXIF `ILCE-7M3 v4.04`; PTP reports "4.0").
+- The camera's clock was ~30 days fast until 2026-10-24; shots from before the
+  fix are dated up to 2026-11-23 and land in that library folder.
+- **Send to Computer needs Sony's 0x9280/0x9281 handshake** (as libgphoto2 does
+  it): with it the camera shows "Sending… Shutterdrop", stays connected
+  (11 min tested) and shuts down when done; without it the camera drops the
+  connection after ~2 minutes.
+- **Import is slow over Wi-Fi:** listing the card takes ~17–20 s, and speed
+  fell from ~1.2 MB/s to ~0.2 MB/s over an 11-minute import (25 MB ARWs). The
+  app needs progress and resume (re-running already skips copied files).
+- The camera announces itself over SSDP a second or so before port 15740
+  accepts connections; the importer retries for 20 s.
 
 ## Requirements
 

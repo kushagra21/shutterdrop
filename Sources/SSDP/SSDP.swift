@@ -12,6 +12,8 @@ public struct SSDPMessage: Sendable, Equatable {
     /// Header names are uppercased.
     public var headers: [String: String]
 
+    public var location: String? { headers["LOCATION"] }
+
     /// Heuristic for a camera: an ILCE model name, Sony's imaging-device server
     /// string, or the MTP "null service" used by Send to Computer.
     public var looksLikeSonyCamera: Bool {
@@ -60,13 +62,14 @@ public enum SSDP {
     public static let port: UInt16 = 1900
 
     /// Sends M-SEARCH a few times and reports every SSDP message received for
-    /// `seconds`. Also listens on port 1900 for NOTIFY/M-SEARCH from other
-    /// devices when that port can be shared. Returns whether it could.
+    /// `seconds`, or until `onMessage` returns true. Also listens on port 1900
+    /// for NOTIFY/M-SEARCH from other devices when that port can be shared.
+    /// Returns whether it could.
     @discardableResult
     public static func discover(
         seconds: Double,
         searchTarget: String = "ssdp:all",
-        onMessage: @escaping @Sendable (SSDPMessage) -> Void
+        onMessage: @escaping @Sendable (SSDPMessage) -> Bool
     ) async throws -> Bool {
         try await withCheckedThrowingContinuation { continuation in
             DispatchQueue.global(qos: .userInitiated).async {
@@ -77,7 +80,7 @@ public enum SSDP {
         }
     }
 
-    private static func run(seconds: Double, searchTarget: String, onMessage: (SSDPMessage) -> Void) throws -> Bool {
+    private static func run(seconds: Double, searchTarget: String, onMessage: (SSDPMessage) -> Bool) throws -> Bool {
         let fd = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP)
         guard fd >= 0 else { throw SSDPError.socket("socket", errno) }
         defer { close(fd) }
@@ -136,8 +139,9 @@ public enum SSDP {
                 throw SSDPError.socket("recvfrom", errno)
             }
             let sender = String(cString: inet_ntoa(from.sin_addr))
-            if let message = SSDPMessage.parse(String(decoding: buffer[0..<count], as: UTF8.self), sender: sender) {
-                onMessage(message)
+            if let message = SSDPMessage.parse(String(decoding: buffer[0..<count], as: UTF8.self), sender: sender),
+               onMessage(message) {
+                break
             }
         }
         return listening

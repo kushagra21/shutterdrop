@@ -10,8 +10,10 @@ let package = Package(
     targets: [
         .target(name: "PTPIP"),
         .target(name: "SSDP"),
-        .executableTarget(name: "sdprobe", dependencies: ["PTPIP", "SSDP"]),
+        .target(name: "ShutterdropCore", dependencies: ["PTPIP", "SSDP"]),
+        .executableTarget(name: "sdprobe", dependencies: ["PTPIP", "SSDP", "ShutterdropCore"]),
         .testTarget(name: "PTPIPTests", dependencies: ["PTPIP"]),
         .testTarget(name: "SSDPTests", dependencies: ["SSDP"]),
+        .testTarget(name: "ShutterdropCoreTests", dependencies: ["ShutterdropCore"]),
     ]
 )

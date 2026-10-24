@@ -11,6 +11,9 @@ public enum PTPCode {
         public static let getObject: UInt16 = 0x1009
         public static let sonySDIOConnect: UInt16 = 0x9201
         public static let sonyGetSDIOExtDeviceInfo: UInt16 = 0x9202
+        /// Send to Computer session control over PTP/IP (names unknown; see libgphoto2).
+        public static let sony9280: UInt16 = 0x9280
+        public static let sony9281: UInt16 = 0x9281
     }
 
     public enum Response {
@@ -33,6 +36,7 @@ public enum PTPCode {
         0x9203: "Sony GetDevicePropDesc", 0x9204: "Sony GetDevicePropertyValue",
         0x9205: "Sony SetControlDeviceA", 0x9206: "Sony GetControlDeviceDesc",
         0x9207: "Sony SetControlDeviceB", 0x9209: "Sony GetAllDevicePropData",
+        0x9280: "Sony 9280 (transfer control)", 0x9281: "Sony 9281 (transfer status)",
     ]
 
     static let responseNames: [UInt16: String] = [

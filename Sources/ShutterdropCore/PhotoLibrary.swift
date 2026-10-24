@@ -1,0 +1,101 @@
+import Foundation
+
+/// A shot as it lands on the Mac: a live preview or a full-size original.
+public struct Photo: Equatable, Sendable {
+    public var url: URL
+    /// When the camera took it, by the camera's clock.
+    public var captured: Date?
+}
+
+/// Where Shutterdrop keeps photos: `<root>/<yyyy-MM-dd>/previews` and
+/// `<root>/<yyyy-MM-dd>/originals`, dated by the camera's clock.
+/// An original's capture time is stored as its file modification date.
+public struct PhotoLibrary: Sendable {
+    public static var defaultRoot: URL {
+        FileManager.default.urls(for: .picturesDirectory, in: .userDomainMask)[0].appending(path: "Shutterdrop")
+    }
+
+    public let root: URL
+
+    public init(root: URL = defaultRoot) {
+        self.root = root
+    }
+
+    public func previewsFolder(for date: Date?) -> URL { dayFolder(date).appending(path: "previews") }
+    public func originalsFolder(for date: Date?) -> URL { dayFolder(date).appending(path: "originals") }
+
+    public func dayFolder(_ date: Date?) -> URL {
+        guard let date else { return root.appending(path: "undated") }
+        let day = Calendar.current.dateComponents([.year, .month, .day], from: date)
+        return root.appending(path: String(format: "%04d-%02d-%02d", day.year!, day.month!, day.day!))
+    }
+
+    /// Moves a downloaded postview into the library under its camera file name.
+    public func addPreview(from temporary: URL, named name: String) throws -> Photo {
+        let captured = CameraTimestamp.fromPreviewName(name)
+        let destination = try prepare(previewsFolder(for: captured), name)
+        try FileManager.default.moveItem(at: temporary, to: destination)
+        return Photo(url: destination, captured: captured)
+    }
+
+    public func hasOriginal(named name: String, size: UInt32, captured: Date?) -> Bool {
+        let url = originalsFolder(for: captured).appending(path: name)
+        let attributes = try? FileManager.default.attributesOfItem(atPath: url.path)
+        return (attributes?[.size] as? NSNumber)?.uint64Value == UInt64(size)
+    }
+
+    public func addOriginal(_ bytes: [UInt8], named name: String, captured: Date?) throws -> Photo {
+        let destination = try prepare(originalsFolder(for: captured), name)
+        try Data(bytes).write(to: destination, options: .atomic)
+        if let captured {
+            try FileManager.default.setAttributes([.modificationDate: captured], ofItemAtPath: destination.path)
+        }
+        return Photo(url: destination, captured: captured)
+    }
+
+    public func previews(inDay folder: URL) -> [Photo] {
+        files(in: folder.appending(path: "previews")).map { Photo(url: $0, captured: CameraTimestamp.fromPreviewName($0.lastPathComponent)) }
+    }
+
+    public func originals(inDay folder: URL) -> [Photo] {
+        files(in: folder.appending(path: "originals")).map { url in
+            let modified = try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
+            return Photo(url: url, captured: modified)
+        }
+    }
+
+    private func files(in folder: URL) -> [URL] {
+        let urls = (try? FileManager.default.contentsOfDirectory(at: folder, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
+        return urls.filter { !$0.lastPathComponent.hasPrefix(".") }.sorted { $0.lastPathComponent < $1.lastPathComponent }
+    }
+
+    /// Creates `folder` and returns the destination for `name`, replacing any existing file.
+    private func prepare(_ folder: URL, _ name: String) throws -> URL {
+        try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        let destination = folder.appending(path: name)
+        if FileManager.default.fileExists(atPath: destination.path) {
+            try FileManager.default.removeItem(at: destination)
+        }
+        return destination
+    }
+}
+
+/// Camera timestamps carry no time zone; they are read as Mac local time.
+public enum CameraTimestamp {
+    /// Remote API postview names look like `pict261123_1338510000.JPG`:
+    /// `pict<yyMMdd>_<HHmmss>` followed by four more digits.
+    public static func fromPreviewName(_ name: String) -> Date? {
+        guard let match = name.firstMatch(of: /pict(\d{2})(\d{2})(\d{2})_(\d{2})(\d{2})(\d{2})/) else { return nil }
+        return date(2000 + Int(match.1)!, Int(match.2)!, Int(match.3)!, Int(match.4)!, Int(match.5)!, Int(match.6)!)
+    }
+
+    /// PTP DateTime strings: `yyyyMMdd'T'HHmmss`, optionally followed by tenths or a zone (ignored).
+    public static func fromPTP(_ text: String) -> Date? {
+        guard let match = text.firstMatch(of: /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})/) else { return nil }
+        return date(Int(match.1)!, Int(match.2)!, Int(match.3)!, Int(match.4)!, Int(match.5)!, Int(match.6)!)
+    }
+
+    private static func date(_ year: Int, _ month: Int, _ day: Int, _ hour: Int, _ minute: Int, _ second: Int) -> Date? {
+        Calendar.current.date(from: DateComponents(year: year, month: month, day: day, hour: hour, minute: minute, second: second))
+    }
+}
