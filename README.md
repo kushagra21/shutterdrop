@@ -117,6 +117,7 @@ either project.
 
 ## License
 
-[MIT](LICENSE). Sony, Alpha and related names are trademarks of Sony Group
-Corporation. Shutterdrop is an independent project, not affiliated with or
-endorsed by Sony.
+[MIT](LICENSE). Shutterdrop is a free, open-source hobby project: it isn't
+sold and doesn't make money. Sony, Alpha and related names are trademarks of
+Sony Group Corporation, used only to say which camera Shutterdrop works with.
+Shutterdrop is not affiliated with or endorsed by Sony.
